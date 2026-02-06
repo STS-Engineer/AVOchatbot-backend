@@ -1,0 +1,3 @@
+"""
+Core module - Init file
+"""
