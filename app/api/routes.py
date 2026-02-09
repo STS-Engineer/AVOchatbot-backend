@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 from loguru import logger
 from pathlib import Path
+from typing import Optional
 from app.models.schemas import (
     ChatRequest, ChatResponse, HistoryRequest, HistoryResponse,
     SearchRequest, SearchResponse, HistoryMessage
@@ -55,7 +56,8 @@ async def chat(request: ChatRequest) -> ChatResponse:
         result = chat_service.process_message(
             message=request.message,
             top_k=request.top_k,
-            include_context=request.include_context
+            include_context=request.include_context,
+            conversation_id=request.conversation_id,
         )
         
         if result["success"]:
@@ -73,7 +75,8 @@ async def chat(request: ChatRequest) -> ChatResponse:
 @router.get("/history", response_model=HistoryResponse, summary="Get conversation history")
 async def get_history(
     limit: int = Query(50, ge=1, le=200, description="Number of messages to retrieve"),
-    offset: int = Query(0, ge=0, description="Offset for pagination")
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
+    conversation_id: Optional[str] = Query(None, description="Conversation identifier")
 ) -> HistoryResponse:
     """
     Retrieve the conversation history with pagination support.
@@ -92,7 +95,7 @@ async def get_history(
         if not chat_service:
             init_services()
         
-        messages = chat_service.get_history(limit=limit, offset=offset)
+        messages = chat_service.get_history(limit=limit, offset=offset, conversation_id=conversation_id)
         
         # Convert to HistoryMessage objects
         history_messages = [
@@ -108,7 +111,7 @@ async def get_history(
         return HistoryResponse(
             success=True,
             messages=history_messages,
-            total=chat_service.get_history_count(),
+            total=chat_service.get_history_count(conversation_id=conversation_id),
             timestamp=datetime.now()
         )
     
@@ -118,13 +121,15 @@ async def get_history(
 
 
 @router.post("/clear-history", summary="Clear conversation history")
-async def clear_history():
-    """Clear all conversation history."""
+async def clear_history(
+    conversation_id: Optional[str] = Query(None, description="Conversation identifier")
+):
+    """Clear conversation history."""
     try:
         if not chat_service:
             init_services()
         
-        success = chat_service.clear_history()
+        success = chat_service.clear_history(conversation_id=conversation_id)
         
         return {
             "success": success,

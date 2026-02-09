@@ -13,6 +13,7 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=5000, description="User's query")
     include_context: bool = Field(default=True, description="Include retrieved context in response")
     top_k: Optional[int] = Field(default=8, ge=1, le=20, description="Number of context items to retrieve")
+    conversation_id: Optional[str] = Field(default=None, description="Conversation identifier")
     
     class Config:
         json_schema_extra = {
@@ -28,6 +29,7 @@ class HistoryRequest(BaseModel):
     """Request to get conversation history."""
     limit: Optional[int] = Field(default=50, ge=1, le=200, description="Number of messages to retrieve")
     offset: Optional[int] = Field(default=0, ge=0, description="Offset for pagination")
+    conversation_id: Optional[str] = Field(default=None, description="Conversation identifier")
 
 
 class SearchRequest(BaseModel):

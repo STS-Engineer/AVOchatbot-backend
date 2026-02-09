@@ -348,22 +348,8 @@ class RAGService:
                     for att in attachments:
                         logger.debug(f"  Attachment: {att.get('file_name')} ({att.get('file_type')})")
                 
-                # Get child nodes and their attachments
-                child_nodes = self.db.get_child_nodes(node_id)
-                if child_nodes:
-                    logger.debug(f"Found {len(child_nodes)} child nodes for {node_id}")
-                    for child in child_nodes:
-                        child_id = child.get('id')
-                        child_attachments = self.db.get_attachments_for_node(child_id)
-                        if child_attachments:
-                            # Fix MIME types and tag with parent info
-                            for att in child_attachments:
-                                if att.get('file_type') == 'unknown' or not att.get('file_type'):
-                                    att['file_type'] = get_mime_type(att.get('file_path', ''))
-                                att['parent_node_title'] = child.get('title')
-                                att['parent_node_type'] = child.get('node_type')
-                            all_attachments.extend(child_attachments)
-                            logger.debug(f"  Found {len(child_attachments)} attachments for child node {child_id}")
+                # Do not include child node attachments here.
+                # Child items are returned separately and will include their own attachments.
                 
                 # Sort attachments: images first, then by filename
                 def sort_attachments(att):
@@ -410,8 +396,8 @@ class RAGService:
             attachments = item.get('attachments', [])
             similarity = item.get('similarity', 0)
             
-            # Header with source information
-            section = f"\n[Section {i}] {title}"
+            # Header with source information (no section numbering)
+            section = f"\n{title}"
             if node_type:
                 section += f" ({node_type})"
             if similarity > 0:

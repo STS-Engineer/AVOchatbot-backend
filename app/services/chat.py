@@ -16,16 +16,17 @@ class ChatService:
         """Initialize chat service."""
         self.rag_service = get_rag_service()
         self.llm_service = get_llm_service()
-        self.conversation_history: List[Dict[str, Any]] = []
-        self.last_context: Optional[str] = None
-        self.last_context_items: List[Dict[str, Any]] = []
+        self.conversation_history_by_id: Dict[str, List[Dict[str, Any]]] = {}
+        self.last_context_by_id: Dict[str, Optional[str]] = {}
+        self.last_context_items_by_id: Dict[str, List[Dict[str, Any]]] = {}
         logger.info("Chat Service initialized")
     
     def process_message(
         self,
         message: str,
         top_k: Optional[int] = None,
-        include_context: bool = True
+        include_context: bool = True,
+        conversation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Process a user message and return AI response with context.
@@ -41,8 +42,11 @@ class ChatService:
         try:
             logger.info(f"Processing message: {message[:100]}...")
             
+            conversation_key = self._normalize_conversation_id(conversation_id)
+            history = self._get_history_list(conversation_key)
+
             # Store user message in history
-            self.conversation_history.append({
+            history.append({
                 "role": "user",
                 "content": message,
                 "timestamp": datetime.now()
@@ -57,7 +61,44 @@ class ChatService:
 
             if is_greeting:
                 response = self._greeting_response()
-                self.conversation_history.append({
+                history.append({
+                    "role": "assistant",
+                    "content": response,
+                    "timestamp": datetime.now(),
+                    "context_count": 0
+                })
+
+                return {
+                    "success": True,
+                    "message": response,
+                    "context": None,
+                    "context_items": None,
+                    "context_count": 0,
+                    "timestamp": datetime.now().isoformat()
+                }
+
+            is_thanks = self._is_thanks(message)
+            if is_thanks:
+                response = self._thanks_response()
+                history.append({
+                    "role": "assistant",
+                    "content": response,
+                    "timestamp": datetime.now(),
+                    "context_count": 0
+                })
+
+                return {
+                    "success": True,
+                    "message": response,
+                    "context": None,
+                    "context_items": None,
+                    "context_count": 0,
+                    "timestamp": datetime.now().isoformat()
+                }
+
+            if self._is_vague_advice_request(message):
+                response = "Sure - what do you need advice on?"
+                history.append({
                     "role": "assistant",
                     "content": response,
                     "timestamp": datetime.now(),
@@ -77,9 +118,12 @@ class ChatService:
                 is_followup = self._is_followup(message)
 
                 # Prefer previous context for follow-ups to keep the same topic
-                if is_followup and self.last_context_items:
-                    used_context_items = self.last_context_items
-                    used_formatted_context = self.last_context or ""
+                last_context_items = self.last_context_items_by_id.get(conversation_key, [])
+                last_context = self.last_context_by_id.get(conversation_key)
+
+                if is_followup and last_context_items:
+                    used_context_items = last_context_items
+                    used_formatted_context = last_context or ""
                     logger.info("Using previous context for follow-up message")
                 else:
                     # Retrieve context from knowledge base only for non-follow-up queries
@@ -90,19 +134,21 @@ class ChatService:
 
                     # Update last context only when new context is found
                     if context_items:
-                        self.last_context_items = context_items
-                        self.last_context = formatted_context
+                        self.last_context_items_by_id[conversation_key] = context_items
+                        self.last_context_by_id[conversation_key] = formatted_context
             
             # Generate response using LLM
             allow_generic_guidance = not used_context_items and self._is_interpersonal(message)
+            history_for_prompt = self._get_history_window(history, exclude_latest=True)
             response = self.llm_service.generate_response(
                 message,
                 context=used_formatted_context,
                 allow_generic_guidance=allow_generic_guidance,
+                conversation_history=history_for_prompt,
             )
             
             # Store assistant response in history
-            self.conversation_history.append({
+            history.append({
                 "role": "assistant",
                 "content": response,
                 "timestamp": datetime.now(),
@@ -189,6 +235,75 @@ class ChatService:
             "You can ask about policies, procedures, or any internal guidance."
         )
 
+    def _is_thanks(self, message: str) -> bool:
+        """Detect a short thank-you message."""
+        message_lower = message.strip().lower()
+        if not message_lower:
+            return False
+
+        import re
+        clean_message = re.sub(r"[^a-z0-9\s]", " ", message_lower).strip()
+        if not clean_message:
+            return False
+
+        tokens = clean_message.split()
+        if not tokens:
+            return False
+
+        thanks_tokens = {
+            "thanks", "thank", "thankyou", "thx", "ty", "merci", "thanks!",
+        }
+
+        if clean_message in {"thank you", "thanks", "thanks a lot", "thank you!", "merci"}:
+            return True
+
+        if tokens[0] in thanks_tokens and len(tokens) <= 4:
+            return True
+
+        if "thank you" in clean_message and len(tokens) <= 6:
+            return True
+
+        return False
+
+    def _thanks_response(self) -> str:
+        """Return a brief thank-you response."""
+        return "Thank you!"
+
+    def _is_vague_advice_request(self, message: str) -> bool:
+        """Detect short, vague requests for advice without a topic."""
+        message_lower = message.strip().lower()
+        if not message_lower:
+            return False
+
+        import re
+        clean_message = re.sub(r"[^a-z0-9\s]", " ", message_lower).strip()
+        if not clean_message:
+            return False
+
+        tokens = clean_message.split()
+        if len(tokens) > 6:
+            return False
+
+        vague_phrases = {
+            "i need your advice",
+            "need advice",
+            "i need advice",
+            "i want advice",
+            "can you advise",
+            "can you give advice",
+            "advice please",
+            "need help",
+            "i need help",
+        }
+
+        if clean_message in vague_phrases:
+            return True
+
+        if "advice" in tokens and len(tokens) <= 4:
+            return True
+
+        return False
+
     def _is_interpersonal(self, message: str) -> bool:
         """Detect interpersonal workplace situations."""
         message_lower = message.strip().lower()
@@ -232,7 +347,12 @@ class ChatService:
 
         return False
     
-    def get_history(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+    def get_history(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        conversation_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Get conversation history with pagination.
         
@@ -244,34 +364,69 @@ class ChatService:
             List of conversation messages
         """
         try:
-            start = max(0, len(self.conversation_history) - limit - offset)
-            end = max(0, len(self.conversation_history) - offset)
-            
-            history = self.conversation_history[start:end]
+            conversation_key = self._normalize_conversation_id(conversation_id)
+            history = self._get_history_list(conversation_key)
+
+            start = max(0, len(history) - limit - offset)
+            end = max(0, len(history) - offset)
+
+            history_slice = history[start:end]
             
             # Convert datetime objects to ISO format strings
-            for msg in history:
+            for msg in history_slice:
                 if isinstance(msg.get('timestamp'), datetime):
                     msg['timestamp'] = msg['timestamp'].isoformat()
             
-            return history
+            return history_slice
         except Exception as e:
             logger.error(f"Error retrieving history: {e}")
             return []
     
-    def clear_history(self) -> bool:
+    def clear_history(self, conversation_id: Optional[str] = None) -> bool:
         """Clear conversation history."""
         try:
-            self.conversation_history = []
-            logger.info("Conversation history cleared")
+            conversation_key = self._normalize_conversation_id(conversation_id)
+            if conversation_id is None:
+                self.conversation_history_by_id = {}
+                self.last_context_by_id = {}
+                self.last_context_items_by_id = {}
+                logger.info("All conversation history cleared")
+                return True
+
+            self.conversation_history_by_id.pop(conversation_key, None)
+            self.last_context_by_id.pop(conversation_key, None)
+            self.last_context_items_by_id.pop(conversation_key, None)
+            logger.info(f"Conversation history cleared for {conversation_key}")
             return True
         except Exception as e:
             logger.error(f"Error clearing history: {e}")
             return False
     
-    def get_history_count(self) -> int:
+    def get_history_count(self, conversation_id: Optional[str] = None) -> int:
         """Get total number of messages in history."""
-        return len(self.conversation_history)
+        conversation_key = self._normalize_conversation_id(conversation_id)
+        return len(self._get_history_list(conversation_key))
+
+    def _normalize_conversation_id(self, conversation_id: Optional[str]) -> str:
+        cleaned = (conversation_id or "").strip()
+        return cleaned or "default"
+
+    def _get_history_list(self, conversation_id: str) -> List[Dict[str, Any]]:
+        if conversation_id not in self.conversation_history_by_id:
+            self.conversation_history_by_id[conversation_id] = []
+        return self.conversation_history_by_id[conversation_id]
+
+    def _get_history_window(
+        self,
+        history: List[Dict[str, Any]],
+        max_messages: int = 12,
+        exclude_latest: bool = False,
+    ) -> List[Dict[str, Any]]:
+        if not history:
+            return []
+
+        window = history[:-1] if exclude_latest and len(history) > 1 else history
+        return window[-max_messages:]
 
 
 # Global chat service instance
