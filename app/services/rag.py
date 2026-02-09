@@ -7,6 +7,7 @@ from loguru import logger
 from app.core.config import settings
 from app.services.database import get_database
 from app.services.embedding import get_embedding_service
+from app.services.llm import get_llm_service
 
 
 class RAGService:
@@ -16,6 +17,7 @@ class RAGService:
         """Initialize RAG service."""
         self.db = get_database()
         self.embedding_service = get_embedding_service()
+        self.llm_service = get_llm_service()
         self.top_k = top_k
         self.similarity_threshold = similarity_threshold
         # For semantic search, use a slightly lower threshold to catch synonyms and related concepts
@@ -34,11 +36,14 @@ class RAGService:
             k = k or self.top_k
             logger.info(f"Retrieving context for: '{query}'")
             
-            # Clean query - remove common question patterns
-            import re
-            clean_query = re.sub(r'^(what\s+is|who\s+is|explain|tell\s+me|describe)\s+', '', query.lower(), flags=re.IGNORECASE)
-            clean_query = re.sub(r'\?$', '', clean_query).strip()
-            main_term = clean_query.split()[-1] if clean_query else query.lower()
+            # Build query variants (original + translated if needed)
+            query_variants = [query]
+            translated_query = None
+            if self._should_translate(query):
+                translated_query = self.llm_service.translate_to_english(query)
+                if translated_query and translated_query.lower().strip() != query.lower().strip():
+                    query_variants.append(translated_query)
+                    logger.info(f"Added translated query for retrieval: '{translated_query[:120]}'")
             
             logger.info(f"Using embedding model for semantic understanding: '{query}'")
             
@@ -47,12 +52,15 @@ class RAGService:
             
             # STRATEGY 1: Exact/Title Match (highest priority)
             logger.debug("[STRATEGY 1] Searching for title match...")
-            title_results = self.db.search_by_title(clean_query, limit=k*2)
-            for result in title_results:
-                result_id = result.get('id')
-                all_results[result_id] = result
-                match_scores[result_id] = 100
-                logger.debug(f"Title match: {result.get('title')}")
+            for variant in query_variants:
+                clean_query = self._clean_query(variant)
+                title_results = self.db.search_by_title(clean_query, limit=k*2)
+                for result in title_results:
+                    result_id = result.get('id')
+                    if result_id not in all_results:
+                        all_results[result_id] = result
+                    match_scores[result_id] = max(match_scores.get(result_id, 0), 100)
+                    logger.debug(f"Title match: {result.get('title')}")
             
             # If exact match found, use it
             if all_results:
@@ -61,6 +69,8 @@ class RAGService:
                     key=lambda x: match_scores.get(x.get('id'), 0),
                     reverse=True
                 )[:k]
+
+                sorted_results = self._expand_with_children(sorted_results, match_scores, k)
                 
                 enriched_results = [self._enrich_result(r) for r in sorted_results]
                 
@@ -72,31 +82,30 @@ class RAGService:
                 
                 formatted_context = self._format_context(enriched_results)
                 logger.info(f"Retrieved {len(enriched_results)} title matches")
-                return formatted_context, enriched_results[:k]
+                return formatted_context, enriched_results
             
             # STRATEGY 2: Semantic Similarity Search (uses embeddings for synonyms and context)
             logger.debug("[STRATEGY 2] Semantic search using embeddings (handles synonyms automatically)...")
             try:
-                # Embed the original query - the embedding model understands semantics, synonyms, and context
-                query_embedding = self.embedding_service.embed_text(query)
-                
-                # Search with lower threshold to catch semantically related content
-                # This will find results that are semantically similar, including synonyms
-                similarity_results = self.db.search_by_similarity(query_embedding, limit=k*3)
-                
-                for result in similarity_results:
-                    result_id = result.get('id')
-                    similarity = result.get('similarity', 0)
-                    
-                    # Use semantic_threshold which is slightly lower to catch related concepts
-                    if similarity >= self.semantic_threshold:
-                        all_results[result_id] = result
-                        match_scores[result_id] = 60 + (similarity * 20)  # Scale to 60-80
-                        logger.debug(f"Semantic match: {result.get('title')} (similarity: {similarity:.2%})")
-                        
-                        # Log high-quality matches for understanding what the model found
-                        if similarity >= 0.7:
-                            logger.info(f"Strong semantic match: {result.get('title')} (similarity: {similarity:.2%})")
+                for variant in query_variants:
+                    # Embed each variant (original + translated)
+                    query_embedding = self.embedding_service.embed_text(variant)
+
+                    similarity_results = self.db.search_by_similarity(query_embedding, limit=k*3)
+
+                    for result in similarity_results:
+                        result_id = result.get('id')
+                        similarity = result.get('similarity', 0)
+
+                        # Use semantic_threshold which is slightly lower to catch related concepts
+                        if similarity >= self.semantic_threshold:
+                            all_results[result_id] = result
+                            match_scores[result_id] = max(match_scores.get(result_id, 0), 60 + (similarity * 20))
+                            logger.debug(f"Semantic match: {result.get('title')} (similarity: {similarity:.2%})")
+
+                            # Log high-quality matches for understanding what the model found
+                            if similarity >= 0.7:
+                                logger.info(f"Strong semantic match: {result.get('title')} (similarity: {similarity:.2%})")
             except Exception as e:
                 logger.warning(f"Error in semantic search: {e}")
             
@@ -109,6 +118,8 @@ class RAGService:
                     key=lambda x: match_scores.get(x.get('id'), 0),
                     reverse=True
                 )[:k]
+
+                sorted_results = self._expand_with_children(sorted_results, match_scores, k)
                 
                 enriched_results = [self._enrich_result(r) for r in sorted_results]
                 
@@ -125,15 +136,26 @@ class RAGService:
             
             # STRATEGY 3: Keyword Search (last resort, for exact term matching in text)
             logger.debug("[STRATEGY 3] Searching by keyword...")
-            keyword_results = self.db.search_by_keyword(main_term, limit=k*2)
-            for result in keyword_results:
-                result_id = result.get('id')
-                if result_id not in all_results:
-                    all_results[result_id] = result
-                    match_scores[result_id] = 40
-                    logger.debug(f"Keyword match: {result.get('title')}")
+            for variant in query_variants:
+                clean_query = self._clean_query(variant)
+                main_term = clean_query.split()[-1] if clean_query else variant.lower()
+                keyword_results = self.db.search_by_keyword(main_term, limit=k*2)
+                for result in keyword_results:
+                    result_id = result.get('id')
+                    if result_id not in all_results:
+                        all_results[result_id] = result
+                        match_scores[result_id] = 40
+                        logger.debug(f"Keyword match: {result.get('title')}")
             
-            # No results found
+            # No results found, try domain classification fallback
+            if not all_results:
+                fallback_items = self._fallback_to_domain(query)
+                for item in fallback_items:
+                    item_id = item.get('id')
+                    if item_id:
+                        all_results[item_id] = item
+                        match_scores[item_id] = 75
+
             if not all_results:
                 logger.warning(f"No relevant context found for: {query}")
                 return "No relevant context found in the knowledge base.", []
@@ -143,6 +165,8 @@ class RAGService:
                 key=lambda x: match_scores.get(x.get('id'), 0),
                 reverse=True
             )[:k]
+
+            sorted_results = self._expand_with_children(sorted_results, match_scores, k)
             
             enriched_results = [self._enrich_result(r) for r in sorted_results]
             
@@ -160,6 +184,92 @@ class RAGService:
         except Exception as e:
             logger.error(f"Error retrieving context: {e}")
             return "Error retrieving context from knowledge base.", []
+
+    def _expand_with_children(
+        self,
+        results: List[Dict[str, Any]],
+        match_scores: Dict[str, float],
+        k: int
+    ) -> List[Dict[str, Any]]:
+        """Add child nodes for matched parents to enrich context."""
+        if not results:
+            return results
+
+        seen_ids = {item.get('id') for item in results if item.get('id')}
+        parent_ids = [item.get('id') for item in results if item.get('id')]
+
+        for parent_id in parent_ids:
+            child_nodes = self.db.get_child_nodes(parent_id)
+            if not child_nodes:
+                continue
+
+            parent_score = match_scores.get(parent_id, 60)
+            child_score = max(10, parent_score - 15)
+
+            for child in child_nodes:
+                child_id = child.get('id')
+                if not child_id or child_id in seen_ids:
+                    continue
+                match_scores[child_id] = child_score
+                results.append(child)
+                seen_ids.add(child_id)
+
+        return results
+
+    def _fallback_to_domain(self, query: str) -> List[Dict[str, Any]]:
+        """Fallback: classify query to a domain and return it if found."""
+        root_nodes = self.db.get_root_nodes()
+        if not root_nodes:
+            return []
+
+        candidates = [node.get('title') for node in root_nodes if node.get('title')]
+        if not candidates:
+            return []
+
+        selected = self.llm_service.classify_domain(query, candidates)
+        if not selected:
+            return []
+
+        selected_lower = selected.strip().lower()
+        for node in root_nodes:
+            if (node.get('title') or '').strip().lower() == selected_lower:
+                logger.info(f"Domain fallback matched: {node.get('title')}")
+                return [node]
+
+        # Fallback to title search if exact match not found
+        title_results = self.db.search_by_title(selected, limit=1)
+        if title_results:
+            logger.info(f"Domain fallback matched via title search: {title_results[0].get('title')}")
+            return [title_results[0]]
+
+        return []
+
+    def _clean_query(self, query: str) -> str:
+        """Normalize query for title/keyword search."""
+        import re
+        clean_query = re.sub(r'^(what\s+is|who\s+is|explain|tell\s+me|describe)\s+', '', query.lower(), flags=re.IGNORECASE)
+        clean_query = re.sub(r'\?$', '', clean_query).strip()
+        return clean_query
+
+    def _should_translate(self, query: str) -> bool:
+        """Detect non-English queries (lightweight heuristic)."""
+        if not query:
+            return False
+
+        lowered = query.lower()
+        french_markers = [
+            "bonjour", "merci", "retard", "paiement", "equipe", "équipe", "difficile",
+            "sarcastique", "situation", "problème", "probleme", "client", "facture",
+            "responsabilité", "responsabilite", "confiance", "valeurs"
+        ]
+        if any(marker in lowered for marker in french_markers):
+            return True
+
+        # Detect common French diacritics
+        if any(ch in lowered for ch in "àâäçéèêëîïôöùûüÿœ"): 
+            return True
+
+        return False
     
     def _enrich_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """Enrich result with additional information including attachments."""

@@ -42,7 +42,13 @@ class LLMService:
             logger.error(f"Failed to initialize Groq client: {e}")
             # Service degrades gracefully - client stays None
     
-    def generate_response(self, prompt: str, context: str = "", temperature: Optional[float] = None) -> str:
+    def generate_response(
+        self,
+        prompt: str,
+        context: str = "",
+        temperature: Optional[float] = None,
+        allow_generic_guidance: bool = False,
+    ) -> str:
         """
         Generate a response using Groq API.
         
@@ -96,6 +102,16 @@ Examples:
 - RIGHT: "Trust - which refers to the reliance between managers and teams - is built through clear mission definition, communication, escalation, and feedback."
 
 Remember: The system has used semantic search to find relevant content. Your job is to use that context accurately."""
+
+            if allow_generic_guidance:
+                system_message += """
+
+EXCEPTION FOR INTERPERSONAL QUESTIONS:
+- If the context is empty or clearly insufficient AND the user asks about interpersonal workplace situations,
+  you may provide brief, generic professional guidance (2-4 sentences).
+- Keep it practical and neutral (e.g., communicate calmly, focus on facts, ask for a 1:1).
+- Avoid legal/HR determinations and do not invent company policy.
+"""
             
             user_message = f"""Based ONLY on the knowledge base context provided below, answer the user's question.
 
@@ -133,6 +149,78 @@ Answer now:"""
         except Exception as e:
             logger.error(f"Error generating response with Groq: {e}")
             return f"Error generating response: {str(e)}"
+
+    def translate_to_english(self, text: str) -> Optional[str]:
+        """Translate user text to English for retrieval."""
+        if not text or not text.strip():
+            return None
+
+        if not self.client:
+            logger.warning("Groq client not initialized; skipping translation")
+            return None
+
+        try:
+            system_message = (
+                "You are a translation engine. Translate the user's text to English. "
+                "Return only the translation, with no extra commentary."
+            )
+
+            chat_completion = self.client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": text}
+                ],
+                model=self.model,
+                temperature=0.0,
+                max_tokens=min(512, self.max_tokens),
+            )
+
+            translation = chat_completion.choices[0].message.content
+            if not translation:
+                return None
+            return translation.strip()
+        except Exception as e:
+            logger.warning(f"Translation failed: {e}")
+            return None
+
+    def classify_domain(self, text: str, candidates: list[str]) -> Optional[str]:
+        """Pick the best matching domain title from candidates."""
+        if not text or not text.strip() or not candidates:
+            return None
+
+        if not self.client:
+            logger.warning("Groq client not initialized; skipping domain classification")
+            return None
+
+        try:
+            system_message = (
+                "You are a classifier. Choose the single best matching domain title from the list. "
+                "If none match, return NONE. Return only the exact title or NONE."
+            )
+
+            options = "\n".join([f"- {title}" for title in candidates])
+            user_message = f"User query: {text}\n\nDomain titles:\n{options}"
+
+            chat_completion = self.client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": user_message}
+                ],
+                model=self.model,
+                temperature=0.0,
+                max_tokens=min(256, self.max_tokens),
+            )
+
+            choice = chat_completion.choices[0].message.content
+            if not choice:
+                return None
+            choice = choice.strip()
+            if choice.upper() == "NONE":
+                return None
+            return choice
+        except Exception as e:
+            logger.warning(f"Domain classification failed: {e}")
+            return None
 
 
 # Global LLM instance

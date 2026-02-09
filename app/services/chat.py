@@ -17,6 +17,8 @@ class ChatService:
         self.rag_service = get_rag_service()
         self.llm_service = get_llm_service()
         self.conversation_history: List[Dict[str, Any]] = []
+        self.last_context: Optional[str] = None
+        self.last_context_items: List[Dict[str, Any]] = []
         logger.info("Chat Service initialized")
     
     def process_message(
@@ -48,8 +50,10 @@ class ChatService:
             
             # Check if this is a greeting - don't use RAG for simple greetings
             is_greeting = self._is_greeting(message)
-            context_items = []
+            context_items: List[Dict[str, Any]] = []
             formatted_context = ""
+            used_context_items: List[Dict[str, Any]] = []
+            used_formatted_context = ""
 
             if is_greeting:
                 response = self._greeting_response()
@@ -70,30 +74,51 @@ class ChatService:
                 }
             
             if not is_greeting:
-                # Retrieve context from knowledge base only for non-greeting queries
-                formatted_context, context_items = self.rag_service.retrieve_context(message, k=top_k)
+                is_followup = self._is_followup(message)
+
+                # Prefer previous context for follow-ups to keep the same topic
+                if is_followup and self.last_context_items:
+                    used_context_items = self.last_context_items
+                    used_formatted_context = self.last_context or ""
+                    logger.info("Using previous context for follow-up message")
+                else:
+                    # Retrieve context from knowledge base only for non-follow-up queries
+                    formatted_context, context_items = self.rag_service.retrieve_context(message, k=top_k)
+
+                    used_context_items = context_items
+                    used_formatted_context = formatted_context
+
+                    # Update last context only when new context is found
+                    if context_items:
+                        self.last_context_items = context_items
+                        self.last_context = formatted_context
             
             # Generate response using LLM
-            response = self.llm_service.generate_response(message, context=formatted_context)
+            allow_generic_guidance = not used_context_items and self._is_interpersonal(message)
+            response = self.llm_service.generate_response(
+                message,
+                context=used_formatted_context,
+                allow_generic_guidance=allow_generic_guidance,
+            )
             
             # Store assistant response in history
             self.conversation_history.append({
                 "role": "assistant",
                 "content": response,
                 "timestamp": datetime.now(),
-                "context_count": len(context_items)
+                "context_count": len(used_context_items)
             })
             
             result = {
                 "success": True,
                 "message": response,
-                "context": formatted_context if include_context and formatted_context else None,
-                "context_items": context_items if include_context and context_items else None,
-                "context_count": len(context_items),
+                "context": used_formatted_context if include_context and used_formatted_context else None,
+                "context_items": used_context_items if include_context and used_context_items else None,
+                "context_count": len(used_context_items),
                 "timestamp": datetime.now().isoformat()
             }
             
-            logger.info(f"Message processed successfully. Context items: {len(context_items)}")
+            logger.info(f"Message processed successfully. Context items: {len(used_context_items)}")
             return result
         
         except Exception as e:
@@ -163,6 +188,49 @@ class ChatService:
             "Hello! How can I help you today? "
             "You can ask about policies, procedures, or any internal guidance."
         )
+
+    def _is_interpersonal(self, message: str) -> bool:
+        """Detect interpersonal workplace situations."""
+        message_lower = message.strip().lower()
+        if not message_lower:
+            return False
+
+        keywords = [
+            "colleague", "coworker", "co-worker", "manager", "team", "conflict",
+            "sarcastic", "rude", "disrespect", "behavior", "harassment",
+            "collegue", "collègue", "equipe", "équipe", "conflit", "comportement",
+            "sarcastique", "difficile", "tendu", "tension"
+        ]
+
+        return any(word in message_lower for word in keywords)
+
+    def _is_followup(self, message: str) -> bool:
+        """Detect if the message is a short follow-up like 'tell me more'."""
+        message_lower = message.strip().lower()
+        if not message_lower:
+            return False
+
+        import re
+        cleaned = re.sub(r"[^a-z0-9\s]", " ", message_lower).strip()
+        tokens = cleaned.split()
+
+        if len(tokens) <= 6:
+            followup_markers = {
+                "more", "continue", "details", "detail", "elaborate", "expand",
+                "explain", "tell", "talk", "about", "it", "that", "this",
+                "ok", "okay", "please", "encore", "plus", "suite", "continue",
+                "ca", "ce", "cela", "explique", "peux"
+            }
+            if any(token in followup_markers for token in tokens):
+                return True
+
+        if re.search(r"(tell\s+me\s+more|talk\s+more|more\s+about|continue|elaborate)", cleaned):
+            return True
+
+        if re.search(r"(plus\s+de\s+details|dis\s+m\s+en\s+plus|parle\s+plus|explique\s+plus)", cleaned):
+            return True
+
+        return False
     
     def get_history(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
         """

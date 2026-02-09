@@ -197,6 +197,30 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"Error fetching child nodes: {e}")
             return []
+
+    def get_root_nodes(self) -> List[Dict[str, Any]]:
+        """Get all root nodes (domains) with no parent."""
+        try:
+            with self.get_session() as session:
+                result = session.execute(
+                    text("""
+                    SELECT
+                        id,
+                        parent_id,
+                        title,
+                        slug,
+                        node_type,
+                        structured_data
+                    FROM public.knowledge_node
+                    WHERE parent_id IS NULL
+                    AND status = 'draft'
+                    """)
+                )
+                rows = result.fetchall()
+                return [dict(row._mapping) if hasattr(row, '_mapping') else dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Error fetching root nodes: {e}")
+            return []
     
     def get_attachments_for_node(self, node_id: str) -> List[Dict[str, Any]]:
         """Get all attachments for a knowledge node."""
