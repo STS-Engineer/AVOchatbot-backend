@@ -30,22 +30,22 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
     
-    # Database
-    DB_HOST: str = "localhost"
-    DB_PORT: int = 5432
-    DB_NAME: str = "knowledge_DB"
-    DB_USER: str = "postgres"
-    DB_PASSWORD: str = ""
-    DB_SSLMODE: str = "disable"
+    # Database (required from environment)
+    DB_HOST: str
+    DB_PORT: int
+    DB_NAME: str
+    DB_USER: str
+    DB_PASSWORD: str
+    DB_SSLMODE: str
     
-    # Groq LLM
-    GROQ_API_KEY: str = ""
+    # Groq LLM (required from environment)
+    GROQ_API_KEY: str
     LLM_TEMPERATURE: float = 0.7
     LLM_MAX_TOKENS: int = 1024
     LLM_MODEL: str = "llama-3.3-70b-versatile"
     
-    # OpenAI (Embeddings)
-    OPENAI_API_KEY: str = ""
+    # OpenAI (Embeddings) (required from environment)
+    OPENAI_API_KEY: str
     EMBEDDING_MODEL: str = "text-embedding-3-large"
     EMBEDDING_DIMENSION: int = 1536
     
