@@ -117,16 +117,27 @@ class ChatService:
             if not is_greeting:
                 is_followup = self._is_followup(message)
 
-                # Prefer previous context for follow-ups to keep the same topic
+                # Prefer new retrieval for follow-ups using prior topic context
                 last_context_items = self.last_context_items_by_id.get(conversation_key, [])
                 last_context = self.last_context_by_id.get(conversation_key)
 
-                if is_followup and last_context_items:
-                    used_context_items = last_context_items
-                    used_formatted_context = last_context or ""
-                    logger.info("Using previous context for follow-up message")
+                if is_followup:
+                    prior_user_query = self._get_last_user_query(history, exclude_latest=True)
+                    combined_query = self._build_followup_query(prior_user_query, message)
+                    formatted_context, context_items = self.rag_service.retrieve_context(combined_query, k=top_k)
+
+                    if context_items:
+                        used_context_items = context_items
+                        used_formatted_context = formatted_context
+                        self.last_context_items_by_id[conversation_key] = context_items
+                        self.last_context_by_id[conversation_key] = formatted_context
+                        logger.info("Retrieved new context for follow-up message")
+                    elif last_context_items:
+                        used_context_items = last_context_items
+                        used_formatted_context = last_context or ""
+                        logger.info("Fallback to previous context for follow-up message")
                 else:
-                    # Retrieve context from knowledge base only for non-follow-up queries
+                    # Retrieve context from knowledge base for new queries
                     formatted_context, context_items = self.rag_service.retrieve_context(message, k=top_k)
 
                     used_context_items = context_items
@@ -145,6 +156,7 @@ class ChatService:
                 context=used_formatted_context,
                 allow_generic_guidance=allow_generic_guidance,
                 conversation_history=history_for_prompt,
+                is_followup=is_followup,
             )
             
             # Store assistant response in history
@@ -346,6 +358,39 @@ class ChatService:
             return True
 
         return False
+
+    def _get_last_user_query(
+        self,
+        history: List[Dict[str, Any]],
+        exclude_latest: bool = False,
+    ) -> Optional[str]:
+        """Return the most recent substantive user query."""
+        if not history:
+            return None
+
+        items = history[:-1] if exclude_latest else history
+        for item in reversed(items):
+            if item.get("role") != "user":
+                continue
+            content = (item.get("content") or "").strip()
+            if not content:
+                continue
+            if self._is_followup(content) or self._is_greeting(content) or self._is_thanks(content):
+                continue
+            return content
+        return None
+
+    def _build_followup_query(self, prior_query: Optional[str], followup: str) -> str:
+        """Combine prior query with follow-up to enrich retrieval."""
+        followup_clean = (followup or "").strip()
+        if not prior_query:
+            return followup_clean
+
+        prior_clean = prior_query.strip()
+        if not prior_clean:
+            return followup_clean
+
+        return f"{prior_clean}. Follow-up: {followup_clean}"
     
     def get_history(
         self,

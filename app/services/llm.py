@@ -49,6 +49,7 @@ class LLMService:
         temperature: Optional[float] = None,
         allow_generic_guidance: bool = False,
         conversation_history: Optional[list[dict[str, str]]] = None,
+        is_followup: bool = False,
     ) -> str:
         """
         Generate a response using Groq API.
@@ -118,6 +119,15 @@ EXCEPTION FOR INTERPERSONAL QUESTIONS:
             
             history_block = self._format_conversation_history(conversation_history)
 
+            followup_instruction = ""
+            if is_followup:
+                followup_instruction = (
+                    "\nFOLLOW-UP RESPONSE RULES:\n"
+                    "- Do not repeat the previous answer\n"
+                    "- Add new details or angles grounded in the context\n"
+                    "- If the context has no additional details, say so briefly\n"
+                )
+
             user_message = f"""Based ONLY on the knowledge base context provided below, answer the user's question.
 
 CONVERSATION HISTORY (context only, not a knowledge source):
@@ -138,6 +148,7 @@ INSTRUCTIONS:
 5. Do NOT use phrases like "as shown in the image" or "the diagram shows"
 6. If the context doesn't have the answer, clearly state what information is available instead
 7. Be direct and accurate - cite the context titles exactly as provided
+{followup_instruction}
 
 Answer now:"""
             
