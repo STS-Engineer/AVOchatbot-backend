@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str
     LLM_TEMPERATURE: float = 0.7
     LLM_MAX_TOKENS: int = 1024
-    LLM_MODEL: str = "llama-3.3-70b-versatile"
+    LLM_MODEL: str = "openai/gpt-oss-120b"
     
     # OpenAI (Embeddings) (required from environment)
     OPENAI_API_KEY: str
