@@ -158,7 +158,7 @@ class RAGService:
 
             if not all_results:
                 logger.warning(f"No relevant context found for: {query}")
-                return "No relevant context found in the knowledge base.", []
+                return "", []
             
             sorted_results = sorted(
                 all_results.values(),
@@ -183,7 +183,7 @@ class RAGService:
         
         except Exception as e:
             logger.error(f"Error retrieving context: {e}")
-            return "Error retrieving context from knowledge base.", []
+            return "", []
 
     def _expand_with_children(
         self,

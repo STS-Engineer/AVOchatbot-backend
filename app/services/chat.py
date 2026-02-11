@@ -52,109 +52,45 @@ class ChatService:
                 "timestamp": datetime.now()
             })
             
-            # Check if this is a greeting - don't use RAG for simple greetings
-            is_greeting = self._is_greeting(message)
             context_items: List[Dict[str, Any]] = []
             formatted_context = ""
             used_context_items: List[Dict[str, Any]] = []
             used_formatted_context = ""
+            is_followup = self._is_followup(message)
 
-            if is_greeting:
-                response = self._greeting_response()
-                history.append({
-                    "role": "assistant",
-                    "content": response,
-                    "timestamp": datetime.now(),
-                    "context_count": 0
-                })
+            # Prefer new retrieval for follow-ups using prior topic context
+            last_context_items = self.last_context_items_by_id.get(conversation_key, [])
+            last_context = self.last_context_by_id.get(conversation_key)
 
-                return {
-                    "success": True,
-                    "message": response,
-                    "context": None,
-                    "context_items": None,
-                    "context_count": 0,
-                    "timestamp": datetime.now().isoformat()
-                }
+            if is_followup:
+                prior_user_query = self._get_last_user_query(history, exclude_latest=True)
+                combined_query = self._build_followup_query(prior_user_query, message)
+                formatted_context, context_items = self.rag_service.retrieve_context(combined_query, k=top_k)
 
-            is_thanks = self._is_thanks(message)
-            if is_thanks:
-                response = self._thanks_response()
-                history.append({
-                    "role": "assistant",
-                    "content": response,
-                    "timestamp": datetime.now(),
-                    "context_count": 0
-                })
-
-                return {
-                    "success": True,
-                    "message": response,
-                    "context": None,
-                    "context_items": None,
-                    "context_count": 0,
-                    "timestamp": datetime.now().isoformat()
-                }
-
-            if self._is_vague_advice_request(message):
-                response = "Sure - what do you need advice on?"
-                history.append({
-                    "role": "assistant",
-                    "content": response,
-                    "timestamp": datetime.now(),
-                    "context_count": 0
-                })
-
-                return {
-                    "success": True,
-                    "message": response,
-                    "context": None,
-                    "context_items": None,
-                    "context_count": 0,
-                    "timestamp": datetime.now().isoformat()
-                }
-            
-            if not is_greeting:
-                is_followup = self._is_followup(message)
-
-                # Prefer new retrieval for follow-ups using prior topic context
-                last_context_items = self.last_context_items_by_id.get(conversation_key, [])
-                last_context = self.last_context_by_id.get(conversation_key)
-
-                if is_followup:
-                    prior_user_query = self._get_last_user_query(history, exclude_latest=True)
-                    combined_query = self._build_followup_query(prior_user_query, message)
-                    formatted_context, context_items = self.rag_service.retrieve_context(combined_query, k=top_k)
-
-                    if context_items:
-                        used_context_items = context_items
-                        used_formatted_context = formatted_context
-                        self.last_context_items_by_id[conversation_key] = context_items
-                        self.last_context_by_id[conversation_key] = formatted_context
-                        logger.info("Retrieved new context for follow-up message")
-                    elif last_context_items:
-                        used_context_items = last_context_items
-                        used_formatted_context = last_context or ""
-                        logger.info("Fallback to previous context for follow-up message")
-                else:
-                    # Retrieve context from knowledge base for new queries
-                    formatted_context, context_items = self.rag_service.retrieve_context(message, k=top_k)
-
+                if context_items:
                     used_context_items = context_items
                     used_formatted_context = formatted_context
+                    self.last_context_items_by_id[conversation_key] = context_items
+                    self.last_context_by_id[conversation_key] = formatted_context
+                    logger.info("Retrieved new context for follow-up message")
+            else:
+                # Retrieve context from knowledge base for new queries
+                formatted_context, context_items = self.rag_service.retrieve_context(message, k=top_k)
 
-                    # Update last context only when new context is found
-                    if context_items:
-                        self.last_context_items_by_id[conversation_key] = context_items
-                        self.last_context_by_id[conversation_key] = formatted_context
+                used_context_items = context_items
+                used_formatted_context = formatted_context
+
+                # Update last context only when new context is found
+                if context_items:
+                    self.last_context_items_by_id[conversation_key] = context_items
+                    self.last_context_by_id[conversation_key] = formatted_context
             
             # Generate response using LLM
-            allow_generic_guidance = not used_context_items and self._is_interpersonal(message)
             history_for_prompt = self._get_history_window(history, exclude_latest=True)
             response = self.llm_service.generate_response(
                 message,
                 context=used_formatted_context,
-                allow_generic_guidance=allow_generic_guidance,
+                allow_generic_guidance=True,
                 conversation_history=history_for_prompt,
                 is_followup=is_followup,
             )
@@ -222,7 +158,7 @@ class ChatService:
         if not tokens:
             return False
 
-        simple_greetings = {"hello", "hi", "hey", "yo", "sup", "greetings", "howdy"}
+        simple_greetings = {"hello", "hi", "hey", "yo", "sup", "greetings", "howdy","Bonjour"}
         if tokens[0] in simple_greetings and len(tokens) <= 4:
             non_greeting_tokens = {
                 "can", "could", "please", "help", "what", "why", "how",
