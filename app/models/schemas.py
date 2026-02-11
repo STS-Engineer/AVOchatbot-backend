@@ -46,6 +46,15 @@ class SearchRequest(BaseModel):
         }
 
 
+    class EditMessageRequest(BaseModel):
+        """Edit a user message and regenerate the assistant response."""
+        message: str = Field(..., min_length=1, max_length=5000, description="Updated user query")
+        message_index: int = Field(..., ge=0, description="Zero-based index of the user message in history")
+        include_context: bool = Field(default=True, description="Include retrieved context in response")
+        top_k: Optional[int] = Field(default=8, ge=1, le=20, description="Number of context items to retrieve")
+        conversation_id: Optional[str] = Field(default=None, description="Conversation identifier")
+
+
 # Response Models
 class Attachment(BaseModel):
     """File attachment in knowledge base."""

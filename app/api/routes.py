@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 from app.models.schemas import (
     ChatRequest, ChatResponse, HistoryRequest, HistoryResponse,
-    SearchRequest, SearchResponse, HistoryMessage
+    SearchRequest, SearchResponse, HistoryMessage, EditMessageRequest
 )
 from app.services.chat import get_chat_service
 from app.services.rag import get_rag_service
@@ -69,6 +69,42 @@ async def chat(request: ChatRequest) -> ChatResponse:
         raise
     except Exception as e:
         logger.error(f"Error in chat endpoint: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/edit-message", response_model=ChatResponse, summary="Edit a message and regenerate response")
+async def edit_message(request: EditMessageRequest) -> ChatResponse:
+    """
+    Edit a prior user message and regenerate the assistant response.
+
+    **Request Body:**
+    - `message`: Updated user message
+    - `message_index`: Zero-based index of the user message in history
+    - `include_context`: Whether to include retrieved context in response
+    - `top_k`: Number of context items to retrieve
+    - `conversation_id`: Conversation identifier
+    """
+    try:
+        if not chat_service:
+            init_services()
+
+        result = chat_service.edit_message_and_respond(
+            message_index=request.message_index,
+            new_message=request.message,
+            top_k=request.top_k,
+            include_context=request.include_context,
+            conversation_id=request.conversation_id,
+        )
+
+        if result["success"]:
+            return ChatResponse(**result)
+        else:
+            raise HTTPException(status_code=400, detail=result.get("error", "Failed to edit message"))
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in edit-message endpoint: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

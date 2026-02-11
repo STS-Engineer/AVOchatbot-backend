@@ -91,11 +91,13 @@ class ChatService:
             
             # Generate response using LLM
             history_for_prompt = self._get_history_window(history, exclude_latest=True)
+            last_assistant_response = self._get_last_assistant_response(history_for_prompt)
             response = self.llm_service.generate_response(
                 message,
                 context=used_formatted_context,
                 allow_generic_guidance=True,
                 conversation_history=history_for_prompt,
+                last_assistant_response=last_assistant_response,
                 is_followup=is_followup,
             )
             
@@ -125,6 +127,104 @@ class ChatService:
                 "success": False,
                 "error": str(e),
                 "message": "An error occurred while processing your message. Please try again.",
+                "timestamp": datetime.now().isoformat()
+            }
+
+    def edit_message_and_respond(
+        self,
+        message_index: int,
+        new_message: str,
+        top_k: Optional[int] = None,
+        include_context: bool = True,
+        conversation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Edit a prior user message, truncate history, and regenerate the assistant response.
+        """
+        try:
+            logger.info(f"Editing message at index {message_index}: {new_message[:100]}...")
+
+            conversation_key = self._normalize_conversation_id(conversation_id)
+            history = self._get_history_list(conversation_key)
+
+            if message_index < 0 or message_index >= len(history):
+                raise ValueError("Message index out of range")
+
+            if history[message_index].get("role") != "user":
+                raise ValueError("Only user messages can be edited")
+
+            # Update the user message and truncate any following messages
+            history[message_index]["content"] = new_message
+            history[message_index]["timestamp"] = datetime.now()
+            del history[message_index + 1 :]
+
+            # Reset cached context for this conversation
+            self.last_context_by_id.pop(conversation_key, None)
+            self.last_context_items_by_id.pop(conversation_key, None)
+
+            context_items: List[Dict[str, Any]] = []
+            formatted_context = ""
+            used_context_items: List[Dict[str, Any]] = []
+            used_formatted_context = ""
+            is_followup = self._is_followup(new_message)
+
+            if is_followup:
+                prior_user_query = self._get_last_user_query(history, exclude_latest=True)
+                combined_query = self._build_followup_query(prior_user_query, new_message)
+                formatted_context, context_items = self.rag_service.retrieve_context(combined_query, k=top_k)
+
+                if context_items:
+                    used_context_items = context_items
+                    used_formatted_context = formatted_context
+                    self.last_context_items_by_id[conversation_key] = context_items
+                    self.last_context_by_id[conversation_key] = formatted_context
+                    logger.info("Retrieved new context for edited follow-up message")
+            else:
+                formatted_context, context_items = self.rag_service.retrieve_context(new_message, k=top_k)
+
+                used_context_items = context_items
+                used_formatted_context = formatted_context
+
+                if context_items:
+                    self.last_context_items_by_id[conversation_key] = context_items
+                    self.last_context_by_id[conversation_key] = formatted_context
+
+            history_for_prompt = self._get_history_window(history, exclude_latest=True)
+            last_assistant_response = self._get_last_assistant_response(history_for_prompt)
+            response = self.llm_service.generate_response(
+                new_message,
+                context=used_formatted_context,
+                allow_generic_guidance=True,
+                conversation_history=history_for_prompt,
+                last_assistant_response=last_assistant_response,
+                is_followup=is_followup,
+            )
+
+            history.append({
+                "role": "assistant",
+                "content": response,
+                "timestamp": datetime.now(),
+                "context_count": len(used_context_items)
+            })
+
+            result = {
+                "success": True,
+                "message": response,
+                "context": used_formatted_context if include_context and used_formatted_context else None,
+                "context_items": used_context_items if include_context and used_context_items else None,
+                "context_count": len(used_context_items),
+                "timestamp": datetime.now().isoformat()
+            }
+
+            logger.info(f"Edited message processed successfully. Context items: {len(used_context_items)}")
+            return result
+
+        except Exception as e:
+            logger.error(f"Error editing message: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "message": "An error occurred while editing your message. Please try again.",
                 "timestamp": datetime.now().isoformat()
             }
     
@@ -412,6 +512,16 @@ class ChatService:
 
         window = history[:-1] if exclude_latest and len(history) > 1 else history
         return window[-max_messages:]
+
+    def _get_last_assistant_response(self, history: List[Dict[str, Any]]) -> Optional[str]:
+        if not history:
+            return None
+
+        for item in reversed(history):
+            if item.get("role") == "assistant":
+                content = (item.get("content") or "").strip()
+                return content or None
+        return None
 
 
 # Global chat service instance

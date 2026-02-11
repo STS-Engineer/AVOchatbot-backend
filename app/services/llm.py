@@ -49,6 +49,7 @@ class LLMService:
         temperature: Optional[float] = None,
         allow_generic_guidance: bool = False,
         conversation_history: Optional[list[dict[str, str]]] = None,
+        last_assistant_response: Optional[str] = None,
         is_followup: bool = False,
     ) -> str:
         """
@@ -122,6 +123,7 @@ GENERAL GUIDANCE:
 """
             
             history_block = self._format_conversation_history(conversation_history)
+            last_assistant_block = (last_assistant_response or "").strip() or "(none)"
 
             followup_instruction = ""
             if is_followup:
@@ -130,12 +132,16 @@ GENERAL GUIDANCE:
                     "- Do not repeat the previous answer\n"
                     "- Add new details or angles grounded in the context\n"
                     "- If the context is empty, elaborate using the prior assistant response and conversation history without adding new facts\n"
+                    "- Do not ask what topic the user means; answer based on the prior assistant response\n"
                 )
 
             user_message = f"""Based ONLY on the knowledge base context provided below, answer the user's question.
 
 CONVERSATION HISTORY (context only, not a knowledge source):
 {history_block}
+
+LAST ASSISTANT RESPONSE (for follow-ups):
+{last_assistant_block}
 
 CONTEXT FROM KNOWLEDGE BASE:
 {context if context else "(no context available)"}
