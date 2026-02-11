@@ -128,7 +128,7 @@ GENERAL GUIDANCE:
                     "\nFOLLOW-UP RESPONSE RULES:\n"
                     "- Do not repeat the previous answer\n"
                     "- Add new details or angles grounded in the context\n"
-                    "- If the context has no additional details, say so briefly\n"
+                    "- If the context is empty, elaborate using the prior assistant response and conversation history without adding new facts\n"
                 )
 
             user_message = f"""Based ONLY on the knowledge base context provided below, answer the user's question.

@@ -73,6 +73,10 @@ class ChatService:
                     self.last_context_items_by_id[conversation_key] = context_items
                     self.last_context_by_id[conversation_key] = formatted_context
                     logger.info("Retrieved new context for follow-up message")
+                elif last_context_items:
+                    used_context_items = last_context_items
+                    used_formatted_context = last_context or ""
+                    logger.info("Fallback to previous context for follow-up message")
             else:
                 # Retrieve context from knowledge base for new queries
                 formatted_context, context_items = self.rag_service.retrieve_context(message, k=top_k)
