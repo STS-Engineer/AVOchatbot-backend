@@ -58,7 +58,7 @@ class Settings(BaseSettings):
         "http://localhost:5173",
         "http://localhost:3000",
         "http://127.0.0.1:5173",
-        "kb-chat.azurewebsites.net"
+        "https://knowledge-chat.azurewebsites.net"
     ]
     
     # Logging
