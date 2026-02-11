@@ -93,7 +93,7 @@ For greetings or casual questions (hello, hi, how are you, etc.):
 - Keep the response brief and friendly
 
 For knowledge base questions:
-- Use the information provided in the context
+- Use the information provided in the context and keep the same meaning
 - The context may use different terminology than the user's question - that's OK, it's semantically related
 - You may explain concepts in your own words as long as you do not add new facts beyond the context
 - If the context is insufficient, ask a clarifying question or explain what you can with what is available
@@ -103,6 +103,7 @@ For general questions or when no context is available:
 - Respond conversationally and helpfully
 - Ask 1-2 clarifying questions when needed
 - Offer brief, practical guidance without claiming specific company policy
+- Add a short note at the end: "Note: No KB context found for this response."
 
 Examples:
 - USER ASKS: "What is reliance between teams?"
@@ -150,7 +151,8 @@ INSTRUCTIONS:
 4. Do NOT use phrases like "as shown in the image" or "the diagram shows"
 5. If the context is empty, respond conversationally and ask 1-2 clarifying questions
 6. If the context doesn't have the answer, clearly state what information is available instead
-7. Be direct and accurate - cite the context titles exactly as provided
+7. If there is no KB context, append: "Note: No KB context found for this response."
+8. Be direct and accurate - cite the context titles exactly as provided
 {followup_instruction}
 
 Answer now:"""
