@@ -143,6 +143,25 @@ GENERAL GUIDANCE:
                     "- If context is empty, do NOT ask clarifying questions; use the last assistant response and conversation history as your grounding.\n"
                 )
 
+            instructions = [
+                "1. If context is available, use it and stay faithful to it",
+                "2. You may explain or rephrase for clarity, but do NOT add new facts beyond the context",
+                "3. Do NOT describe what images contain - they are displayed separately",
+                "4. Do NOT use phrases like \"as shown in the image\" or \"the diagram shows\"",
+                "5. If the context is empty, respond conversationally and ask 1-2 clarifying questions",
+                "6. If the context doesn't have the answer, clearly state what information is available instead",
+                "7. If there is no KB context, append: \"Note: No KB context found for this response.\"",
+                "8. Be direct and accurate - cite the context titles exactly as provided",
+            ]
+
+            if is_followup:
+                instructions[4] = (
+                    "5. If the context is empty, answer using the last assistant response and conversation history; "
+                    "do NOT ask clarifying questions"
+                )
+
+            instructions_block = "\n".join(instructions)
+
             user_message = f"""Based ONLY on the knowledge base context provided below, answer the user's question.
 
 CONVERSATION HISTORY (context only, not a knowledge source):
@@ -159,14 +178,7 @@ CONTEXT FROM KNOWLEDGE BASE:
 USER QUESTION: {prompt}
 
 INSTRUCTIONS:
-1. If context is available, use it and stay faithful to it
-2. You may explain or rephrase for clarity, but do NOT add new facts beyond the context
-3. Do NOT describe what images contain - they are displayed separately
-4. Do NOT use phrases like "as shown in the image" or "the diagram shows"
-5. If the context is empty, respond conversationally and ask 1-2 clarifying questions
-6. If the context doesn't have the answer, clearly state what information is available instead
-7. If there is no KB context, append: "Note: No KB context found for this response."
-8. Be direct and accurate - cite the context titles exactly as provided
+{instructions_block}
 {followup_instruction}
 {followup_override}
 
