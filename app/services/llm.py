@@ -133,6 +133,14 @@ GENERAL GUIDANCE:
                     "- Add new details or angles grounded in the context\n"
                     "- If the context is empty, elaborate using the prior assistant response and conversation history without adding new facts\n"
                     "- Do not ask what topic the user means; answer based on the prior assistant response\n"
+                    "- Do not ask clarifying questions about which document or step the user refers to\n"
+                )
+
+            followup_override = ""
+            if is_followup and last_assistant_response and last_assistant_response != "(none)":
+                followup_override = (
+                    "\nFOLLOW-UP OVERRIDE:\n"
+                    "- If context is empty, do NOT ask clarifying questions; use the last assistant response and conversation history as your grounding.\n"
                 )
 
             user_message = f"""Based ONLY on the knowledge base context provided below, answer the user's question.
@@ -160,6 +168,7 @@ INSTRUCTIONS:
 7. If there is no KB context, append: "Note: No KB context found for this response."
 8. Be direct and accurate - cite the context titles exactly as provided
 {followup_instruction}
+{followup_override}
 
 Answer now:"""
             
