@@ -7,6 +7,7 @@ from datetime import datetime
 from loguru import logger
 from app.services.rag import get_rag_service
 from app.services.llm import get_llm_service
+from app.services.embedding import get_embedding_service
 
 
 class ChatService:
@@ -16,6 +17,7 @@ class ChatService:
         """Initialize chat service."""
         self.rag_service = get_rag_service()
         self.llm_service = get_llm_service()
+        self.embedding_service = get_embedding_service()
         self.conversation_history_by_id: Dict[str, List[Dict[str, Any]]] = {}
         self.last_context_by_id: Dict[str, Optional[str]] = {}
         self.last_context_items_by_id: Dict[str, List[Dict[str, Any]]] = {}
@@ -85,11 +87,25 @@ class ChatService:
                     used_formatted_context = formatted_context
                     self.last_context_items_by_id[conversation_key] = context_items
                     self.last_context_by_id[conversation_key] = formatted_context
-                    logger.info("Retrieved new context for follow-up message")
-                elif last_context_items:
-                    used_context_items = last_context_items
-                    used_formatted_context = last_context or ""
-                    logger.info("Fallback to previous context for follow-up message")
+                    logger.info(f"Retrieved {len(context_items)} new context items for follow-up message")
+                else:
+                    # Fallback: try with just the prior query's topics
+                    logger.info("No results with rewritten query, retrying with prior query as fallback")
+                    if prior_user_query:
+                        formatted_context, context_items = self.rag_service.retrieve_context(prior_user_query, k=top_k)
+                        if context_items:
+                            used_context_items = context_items
+                            used_formatted_context = formatted_context
+                            logger.info(f"Retrieved {len(context_items)} context items using prior query")
+                        elif last_context_items:
+                            # Last resort: use cached context
+                            used_context_items = last_context_items
+                            used_formatted_context = last_context or ""
+                            logger.info("Using cached context from previous exchange")
+                    elif last_context_items:
+                        used_context_items = last_context_items
+                        used_formatted_context = last_context or ""
+                        logger.info("Using cached context (no prior query available)")
             else:
                 logger.info(f"New query (not a follow-up): '{message[:80]}'")
                 # Retrieve context from knowledge base for new queries
@@ -154,6 +170,7 @@ class ChatService:
     ) -> Dict[str, Any]:
         """
         Edit a prior user message, truncate history, and regenerate the assistant response.
+        Intelligently handles message indices by finding user messages only.
         """
         try:
             logger.info(f"Editing message at index {message_index}: {new_message[:100]}...")
@@ -164,21 +181,29 @@ class ChatService:
             # Detailed logging for debugging
             logger.info(f"Edit request - conversation_id: {conversation_id}, normalized: {conversation_key}")
             logger.info(f"Edit request - message_index: {message_index}, history length: {len(history)}")
+            logger.info(f"History roles: {[msg.get('role') for msg in history]}")
             
-            if message_index < 0 or message_index >= len(history):
-                logger.error(f"Message index {message_index} out of range for history length {len(history)}")
-                logger.error(f"History roles: {[msg.get('role') for msg in history]}")
-                raise ValueError(f"Message index {message_index} out of range (history has {len(history)} messages)")
-
-            if history[message_index].get("role") != "user":
-                logger.error(f"Cannot edit non-user message at index {message_index} (role: {history[message_index].get('role')})")
-                raise ValueError("Only user messages can be edited")
+            # Find all user message indices
+            user_message_indices = [i for i, msg in enumerate(history) if msg.get('role') == 'user']
+            
+            if not user_message_indices:
+                logger.error("No user messages found in history")
+                raise ValueError("No user messages to edit")
+            
+            # Map frontend index (user message number) to backend history index
+            if message_index < 0 or message_index >= len(user_message_indices):
+                logger.error(f"User message index {message_index} out of range (found {len(user_message_indices)} user messages)")
+                raise ValueError(f"Message index {message_index} out of range (history has {len(user_message_indices)} user messages)")
+            
+            # Get the actual history index of the user message to edit
+            actual_history_index = user_message_indices[message_index]
+            logger.info(f"Mapping user message index {message_index} to history index {actual_history_index}")
 
             # Update the user message and truncate any following messages
-            logger.info(f"Updating message at index {message_index} and truncating {len(history) - message_index - 1} following messages")
-            history[message_index]["content"] = new_message
-            history[message_index]["timestamp"] = datetime.now()
-            del history[message_index + 1 :]
+            logger.info(f"Updating message at history index {actual_history_index} and truncating {len(history) - actual_history_index - 1} following messages")
+            history[actual_history_index]["content"] = new_message
+            history[actual_history_index]["timestamp"] = datetime.now()
+            del history[actual_history_index + 1 :]
 
             # Reset cached context for this conversation
             self.last_context_by_id.pop(conversation_key, None)
@@ -188,11 +213,24 @@ class ChatService:
             formatted_context = ""
             used_context_items: List[Dict[str, Any]] = []
             used_formatted_context = ""
+            
+            # Check if this is a follow-up after edit
             is_followup = self._is_followup(new_message, history)
 
             if is_followup:
+                # Get context from previous exchange for better query rewriting
                 prior_user_query = self._get_last_user_query(history, exclude_latest=True)
-                combined_query = self._build_followup_query(prior_user_query, new_message)
+                prior_assistant = self._get_last_assistant_response(history)
+                
+                if prior_user_query and prior_assistant:
+                    logger.info(f"Follow-up detected after edit: '{new_message[:80]}'")
+                    # Use intelligent rewriting with full context
+                    combined_query = self._rewrite_with_context(new_message, prior_user_query, prior_assistant)
+                    logger.info(f"Rewritten query for edit: '{combined_query[:120]}'")
+                else:
+                    logger.warning("Follow-up detected but context incomplete - using original query")
+                    combined_query = new_message
+                
                 formatted_context, context_items = self.rag_service.retrieve_context(combined_query, k=top_k)
 
                 if context_items:
@@ -200,8 +238,18 @@ class ChatService:
                     used_formatted_context = formatted_context
                     self.last_context_items_by_id[conversation_key] = context_items
                     self.last_context_by_id[conversation_key] = formatted_context
-                    logger.info("Retrieved new context for edited follow-up message")
+                    logger.info(f"Retrieved {len(context_items)} context items for edited follow-up message")
+                else:
+                    # Fallback: try with just the prior query's topics
+                    if prior_user_query:
+                        logger.info("Retrying with prior query as fallback")
+                        formatted_context, context_items = self.rag_service.retrieve_context(prior_user_query, k=top_k)
+                        if context_items:
+                            used_context_items = context_items
+                            used_formatted_context = formatted_context
             else:
+                # New query - retrieve fresh context
+                logger.info(f"New query after edit (not a follow-up): '{new_message[:80]}'")
                 formatted_context, context_items = self.rag_service.retrieve_context(new_message, k=top_k)
 
                 used_context_items = context_items
@@ -395,39 +443,135 @@ class ChatService:
 
     def _is_followup(self, message: str, history: List[Dict[str, Any]]) -> bool:
         """
-        Use LLM to determine if message is a follow-up requiring prior context.
-        Language-agnostic approach - works for French, English, or any language.
+        Intelligent LLM-based follow-up detection using topic extraction and semantic analysis.
+        No pattern matching - pure AI understanding of conversation continuity.
         """
         # Need at least one prior exchange to have a follow-up
         if not history or len(history) < 2:
             return False
         
-        # Get recent conversation context (last 2 exchanges max)
-        recent_history = history[-4:] if len(history) >= 4 else history
-        context = "\n".join([
-            f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg.get('content', '')[:200]}"
-            for msg in recent_history
-        ])
+        # Get the last user-assistant exchange for topic analysis
+        last_user_msg = self._get_last_user_query(history, exclude_latest=True)
+        last_assistant_msg = self._get_last_assistant_response(history)
         
-        prompt = f"""Given this conversation:
-{context}
+        if not last_user_msg or not last_assistant_msg:
+            logger.debug("No prior exchange found for follow-up detection")
+            return False
+        
+        # Use LLM to extract the main topic from previous conversation and compare
+        prompt = f"""Analyze this conversation to determine if the new message is a follow-up.
+
+Previous exchange:
+User: "{last_user_msg}"
+Assistant: "{last_assistant_msg[:400]}"
 
 New user message: "{message}"
 
-Is this new message a follow-up question that needs the previous context to be understood, or is it a completely new topic?
+Task: Determine if the new message is about the SAME TOPIC as the previous exchange or a DIFFERENT TOPIC.
 
-Answer only "FOLLOWUP" or "NEW_TOPIC"."""
+Analysis criteria:
+1. Topic Continuity: Does the new message discuss the same subject, concept, or domain?
+   - Example: Previous about "SBA loans" → New asks "what are the steps" → SAME TOPIC (SBA)
+   - Example: Previous about "leave policy" → New asks "what is health insurance" → DIFFERENT TOPIC
+
+2. Semantic Relationship: Is the new question conceptually related to what was just discussed?
+   - Asking for more details, steps, examples, clarifications → Usually SAME TOPIC
+   - Introducing a new subject matter entirely → DIFFERENT TOPIC
+
+3. Contextual Dependency: Does the new message need the previous context to be understood?
+   - Uses references like "it", "that", "these steps" → SAME TOPIC
+   - Self-contained question on different subject → DIFFERENT TOPIC
+
+Be intelligent about topic boundaries:
+- "What is X?" followed by "What about Y?" -> If X and Y are related concepts (e.g., both insurance types), treat as SAME TOPIC
+- If Y is completely unrelated to X (different business domain), treat as DIFFERENT TOPIC
+
+Respond with ONLY one of these exact phrases:
+- "SAME_TOPIC" if the new message continues the previous conversation
+- "DIFFERENT_TOPIC" if the new message introduces a new subject"""
         
         try:
-            response = self.llm_service._call_groq(prompt, max_tokens=20, temperature=0.0)
-            is_followup = response and "FOLLOWUP" in response.upper()
-            logger.debug(f"LLM follow-up detection: '{message[:60]}' -> {response} -> {is_followup}")
+            # Increased max_tokens to give model more room to respond reliably
+            response = self.llm_service._call_groq(prompt, max_tokens=50, temperature=0.0)
+            
+            # Handle None or empty responses gracefully
+            if not response or not response.strip():
+                logger.warning(f"LLM returned empty response for follow-up detection, using fallback")
+                return self._is_followup_by_similarity(message, last_user_msg, last_assistant_msg)
+            
+            is_followup = "SAME_TOPIC" in response.upper()
+            
+            logger.info(f"Intelligent follow-up detection: '{message[:60]}' | LLM: {response.strip()} | Result: {'FOLLOWUP' if is_followup else 'NEW_QUERY'}")
             return is_followup
+            
         except Exception as e:
-            logger.error(f"Follow-up detection failed: {e}", exc_info=True)
-            # Fallback: treat very short messages as potential follow-ups
-            return len(message.split()) <= 5
+            logger.error(f"LLM-based follow-up detection failed: {e}", exc_info=True)
+            # Fallback: Use semantic similarity with embeddings
+            return self._is_followup_by_similarity(message, last_user_msg, last_assistant_msg)
 
+    def _is_followup_by_similarity(
+        self, 
+        message: str, 
+        last_user_msg: str, 
+        last_assistant_msg: str
+    ) -> bool:
+        """
+        Fallback: Use embedding similarity to detect follow-ups when LLM fails.
+        Compares semantic similarity between current and previous messages.
+        Also uses linguistic heuristics for generic follow-up phrases.
+        """
+        # First check: Is the message a generic continuation phrase?
+        message_lower = message.lower().strip()
+        generic_followup_patterns = [
+            "what are the", "how does", "can you explain", "tell me more",
+            "what about the", "and the", "more details", "steps", "process",
+            "quelles sont les", "comment", "expliquez", "étapes", "processus",
+            "et les", "plus de détails"
+        ]
+        
+        # If message is generic AND short, it's likely a follow-up
+        is_generic = any(pattern in message_lower for pattern in generic_followup_patterns)
+        is_short = len(message.split()) <= 10
+        
+        if is_generic and is_short:
+            logger.info(f"Generic follow-up phrase detected: '{message[:60]}' -> FOLLOWUP")
+            return True
+        
+        try:
+            # Embed current message and previous context
+            current_embedding = self.embedding_service.embed_text(message)
+            # Combine previous user and assistant for context
+            previous_context = f"{last_user_msg} {last_assistant_msg[:300]}"
+            previous_embedding = self.embedding_service.embed_text(previous_context)
+            
+            # Calculate cosine similarity
+            import numpy as np
+            current_vec = np.array(current_embedding)
+            previous_vec = np.array(previous_embedding)
+            
+            similarity = np.dot(current_vec, previous_vec) / (
+                np.linalg.norm(current_vec) * np.linalg.norm(previous_vec)
+            )
+            
+            # Adaptive threshold: lower for generic questions
+            base_threshold = 0.50  # Lowered from 0.65 to catch more follow-ups
+            threshold = 0.35 if is_generic else base_threshold
+            is_followup = similarity > threshold
+            
+            logger.info(f"Similarity-based follow-up detection: {similarity:.3f} (threshold: {threshold}, generic: {is_generic}) -> {'FOLLOWUP' if is_followup else 'NEW_QUERY'}")
+            return is_followup
+            
+        except Exception as e:
+            logger.error(f"Similarity-based follow-up detection failed: {e}", exc_info=True)
+            # Last resort: generic questions are likely follow-ups if recent context exists
+            if is_generic:
+                logger.debug(f"Fallback: treating generic question as FOLLOWUP")
+                return True
+            # Very short messages might be follow-ups
+            is_followup = len(message.split()) <= 5
+            logger.debug(f"Final fallback: message length {len(message.split())} words -> {'FOLLOWUP' if is_followup else 'NEW_QUERY'}")
+            return is_followup
+    
     def _get_last_user_query(
         self,
         history: List[Dict[str, Any]],
@@ -458,31 +602,54 @@ Answer only "FOLLOWUP" or "NEW_TOPIC"."""
     
     def _rewrite_with_context(self, query: str, prior_query: str, prior_response: str) -> str:
         """
-        Use LLM to rewrite follow-up query as standalone query.
+        Use LLM to rewrite follow-up query as standalone query with topic preservation.
         Language-agnostic - works for any language (French, English, etc.).
+        Intelligently extracts topics and maintains conversation context.
         """
-        # Truncate prior response to avoid token limits
-        prior_response_short = prior_response[:500] if prior_response else ""
+        # Truncate prior response but keep enough context
+        prior_response_short = prior_response[:800] if prior_response else ""
         
-        prompt = f"""Previous user question: "{prior_query}"
-Previous assistant response: "{prior_response_short}"
+        prompt = f"""Conversation context:
+User previously asked: "{prior_query}"
+Assistant responded about: "{prior_response_short}"
 
 New user question: "{query}"
 
-Rewrite the new question as a complete, standalone question that includes all necessary context from the previous exchange. The rewritten question should be understandable without seeing the conversation history. Keep the same language as the user's question.
+Task: Rewrite the new question to be a complete, standalone search query that:
+1. Preserves the EXACT TOPIC from the previous conversation
+2. Incorporates the specific aspect the user is now asking about
+3. Maintains the same language as the user's question
+4. Is optimized for searching a knowledge base
 
-Rewritten question:"""
+Important: Keep the topic focus from the previous exchange. If the previous conversation was about "SBA", the rewritten query must also be about "SBA".
+
+Rewritten standalone search query:"""
         
         try:
-            response = self.llm_service._call_groq(prompt, max_tokens=200, temperature=0.3)
+            response = self.llm_service._call_groq(prompt, max_tokens=250, temperature=0.2)
             if response:
-                logger.debug(f"Query rewritten: '{query[:50]}' -> '{response[:80]}'")
-                return response
+                rewritten = response.strip()
+                logger.info(f"Query rewritten: '{query[:60]}' -> '{rewritten[:100]}'")
+                
+                # Validate the rewrite maintains topic relevance
+                # Extract key terms from prior query
+                prior_terms = set(prior_query.lower().split())
+                rewritten_terms = set(rewritten.lower().split())
+                
+                # Check if rewrite shares some key terms with prior context
+                if len(prior_terms & rewritten_terms) > 0 or len(rewritten.split()) > len(query.split()):
+                    return rewritten
+                else:
+                    logger.warning(f"Rewrite lost context, using enhanced fallback")
+                    # Better fallback that preserves topic
+                    return f"{prior_query} - {query}"
+            
         except Exception as e:
             logger.error(f"Query rewriting failed: {e}", exc_info=True)
         
-        # Fallback: simple concatenation
-        return f"{prior_query}. Follow-up: {query}"
+        # Enhanced fallback: preserve topic from prior query
+        logger.info("Using fallback query combining prior and current")
+        return f"{prior_query} - {query}"
     
     def get_history(
         self,
