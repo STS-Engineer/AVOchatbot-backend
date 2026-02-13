@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     
     # RAG
     TOP_K_RESULTS: int = 8
-    SIMILARITY_THRESHOLD: float = 0.2
+    SIMILARITY_THRESHOLD: float = 0.4  # Raised from 0.2 to reduce false positives
     
     # CORS
     ALLOWED_ORIGINS: List[str] = [

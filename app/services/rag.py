@@ -13,7 +13,7 @@ from app.services.llm import get_llm_service
 class RAGService:
     """Retrieval Augmented Generation service."""
     
-    def __init__(self, top_k: int = 8, similarity_threshold: float = 0.2):
+    def __init__(self, top_k: int = 8, similarity_threshold: float = 0.4):
         """Initialize RAG service."""
         self.db = get_database()
         self.embedding_service = get_embedding_service()
@@ -21,7 +21,8 @@ class RAGService:
         self.top_k = top_k
         self.similarity_threshold = similarity_threshold
         # For semantic search, use a slightly lower threshold to catch synonyms and related concepts
-        self.semantic_threshold = max(0.15, similarity_threshold - 0.05)
+        # Increased from 0.15 to 0.30 to reduce false positives
+        self.semantic_threshold = max(0.30, similarity_threshold - 0.10)
         logger.info(f"RAG Service initialized with top_k={top_k}, threshold={similarity_threshold}, semantic_threshold={self.semantic_threshold}")
     
     def retrieve_context(self, query: str, k: Optional[int] = None) -> Tuple[str, List[Dict[str, Any]]]:
@@ -101,7 +102,8 @@ class RAGService:
                         if similarity >= self.semantic_threshold:
                             all_results[result_id] = result
                             match_scores[result_id] = max(match_scores.get(result_id, 0), 60 + (similarity * 20))
-                            logger.debug(f"Semantic match: {result.get('title')} (similarity: {similarity:.2%})")
+                            # Always log similarity scores for debugging
+                            logger.info(f"Semantic match: '{result.get('title')}' (similarity: {similarity:.2%})")
 
                             # Log high-quality matches for understanding what the model found
                             if similarity >= 0.7:
@@ -244,12 +246,84 @@ class RAGService:
 
         return []
 
+    def _verify_relevance(self, query: str, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Verify that retrieved results are actually relevant to the query.
+        Uses LLM to check if the context addresses the question.
+        Falls back to similarity scores if LLM fails.
+        """
+        if not results:
+            return results
+        
+        # Skip verification for very high similarity matches (>0.6)
+        high_quality_results = [r for r in results if r.get('similarity', 0) > 0.6]
+        if high_quality_results:
+            logger.info(f"Skipping verification for {len(high_quality_results)} high-confidence results (>0.6)")
+            return results  # Trust high similarity scores
+        
+        try:
+            # Extract titles for quick relevance check
+            titles = [r.get('title', '') for r in results if r.get('title')]
+            
+            if not titles:
+                return results
+            
+            # Ask LLM to verify relevance
+            verification_prompt = f"""Does any of these topics directly answer or relate to the question: "{query}"?
+
+Topics:
+{chr(10).join(f"{i+1}. {title}" for i, title in enumerate(titles))}
+
+Respond with ONLY "YES" if at least one topic is relevant, or "NO" if none are relevant."""
+            
+            response = self.llm_service._call_groq(verification_prompt, max_tokens=50, temperature=0.3)
+            
+            if not response:
+                logger.warning(f"Relevance verification failed - LLM returned None/empty")
+                logger.warning(f"Query: '{query[:100]}', Titles: {titles[:3]}, Similarities: {[r.get('similarity', 0) for r in results[:3]]}")
+                # FALLBACK: Use similarity scores instead of rejecting all
+                # Accept results with similarity > 0.35 when LLM fails
+                fallback_results = [r for r in results if r.get('similarity', 0) > 0.35]
+                if fallback_results:
+                    logger.info(f"Using similarity fallback: accepting {len(fallback_results)}/{len(results)} results >0.35")
+                    return fallback_results
+                else:
+                    logger.info(f"All results below 0.35 similarity, rejecting")
+                    return []
+            
+            is_relevant = response.strip().upper().startswith('YES')
+            
+            if not is_relevant:
+                logger.warning(f"Relevance check failed. LLM said: '{response}'")
+                logger.warning(f"Query: '{query}', Topics: {titles}")
+                return []  # Return empty if not relevant
+            
+            logger.info(f"Relevance check passed for query: '{query}'")
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error in relevance verification: {e}", exc_info=True)
+            # On exception, use similarity-based fallback
+            fallback_results = [r for r in results if r.get('similarity', 0) > 0.35]
+            if fallback_results:
+                logger.info(f"Exception fallback: accepting {len(fallback_results)}/{len(results)} results >0.35")
+                return fallback_results
+            return []
+    
     def _clean_query(self, query: str) -> str:
-        """Normalize query for title/keyword search."""
+        """
+        Normalize query for title/keyword search.
+        Removes common question prefixes but preserves non-English queries.
+        """
         import re
-        clean_query = re.sub(r'^(what\s+is|who\s+is|explain|tell\s+me|describe)\s+', '', query.lower(), flags=re.IGNORECASE)
-        clean_query = re.sub(r'\?$', '', clean_query).strip()
-        return clean_query
+        # Remove trailing question marks (language-agnostic)
+        clean_query = re.sub(r'\?$', '', query).strip()
+        
+        # Optionally remove common English question prefixes (fails gracefully for other languages)
+        # This is a best-effort optimization, not a requirement
+        clean_query = re.sub(r'^(what\s+is|who\s+is|explain|tell\s+me|describe)\s+', '', clean_query, flags=re.IGNORECASE)
+        
+        return clean_query.strip()
 
     def _should_translate(self, query: str) -> bool:
         """Detect non-English queries (lightweight heuristic)."""

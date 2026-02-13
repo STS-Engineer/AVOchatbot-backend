@@ -288,6 +288,35 @@ Answer now:"""
             logger.warning(f"Domain classification failed: {e}")
             return None
 
+    def _call_groq(self, prompt: str, max_tokens: int = 100, temperature: float = 0.0) -> Optional[str]:
+        """Generic method to call Groq for simple tasks."""
+        if not self.client:
+            logger.warning("Groq client not initialized")
+            return None
+
+        try:
+            chat_completion = self.client.chat.completions.create(
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                model=self.model,
+                temperature=temperature,
+                max_tokens=min(max_tokens, self.max_tokens),
+            )
+
+            response = chat_completion.choices[0].message.content
+            if response:
+                logger.debug(f"_call_groq response: '{response[:100]}'")
+            else:
+                logger.warning(f"_call_groq got None/empty response")
+                logger.warning(f"Prompt: '{prompt[:200]}'")
+                logger.warning(f"Model: {self.model}, max_tokens: {max_tokens}, temp: {temperature}")
+            return response.strip() if response else None
+        except Exception as e:
+            logger.error(f"Groq call failed: {e}", exc_info=True)
+            logger.error(f"Prompt was: '{prompt[:200]}'")
+            return None
+
 
 # Global LLM instance
 _llm_instance: Optional[LLMService] = None

@@ -56,15 +56,28 @@ class ChatService:
             formatted_context = ""
             used_context_items: List[Dict[str, Any]] = []
             used_formatted_context = ""
-            is_followup = self._is_followup(message)
-
+            
+            # Check if this is a follow-up using LLM (language-agnostic)
+            is_followup = self._is_followup(message, history)
+            
             # Prefer new retrieval for follow-ups using prior topic context
             last_context_items = self.last_context_items_by_id.get(conversation_key, [])
             last_context = self.last_context_by_id.get(conversation_key)
 
             if is_followup:
+                # Get prior context for rewriting
                 prior_user_query = self._get_last_user_query(history, exclude_latest=True)
-                combined_query = self._build_followup_query(prior_user_query, message)
+                prior_assistant = self._get_last_assistant_response(history)
+                
+                if prior_user_query and prior_assistant:
+                    logger.info(f"Follow-up detected for: '{message[:80]}'")
+                    # Use LLM to rewrite query with context (language-agnostic)
+                    combined_query = self._rewrite_with_context(message, prior_user_query, prior_assistant)
+                    logger.info(f"Rewritten query: '{combined_query[:120]}'")
+                else:
+                    logger.warning("Follow-up detected but context incomplete - using original query")
+                    combined_query = message
+                
                 formatted_context, context_items = self.rag_service.retrieve_context(combined_query, k=top_k)
 
                 if context_items:
@@ -78,6 +91,7 @@ class ChatService:
                     used_formatted_context = last_context or ""
                     logger.info("Fallback to previous context for follow-up message")
             else:
+                logger.info(f"New query (not a follow-up): '{message[:80]}'")
                 # Retrieve context from knowledge base for new queries
                 formatted_context, context_items = self.rag_service.retrieve_context(message, k=top_k)
 
@@ -371,33 +385,40 @@ class ChatService:
 
         return any(word in message_lower for word in keywords)
 
-    def _is_followup(self, message: str) -> bool:
-        """Detect if the message is a short follow-up like 'tell me more'."""
-        message_lower = message.strip().lower()
-        if not message_lower:
+    def _is_followup(self, message: str, history: List[Dict[str, Any]]) -> bool:
+        """
+        Use LLM to determine if message is a follow-up requiring prior context.
+        Language-agnostic approach - works for French, English, or any language.
+        """
+        # Need at least one prior exchange to have a follow-up
+        if not history or len(history) < 2:
             return False
+        
+        # Get recent conversation context (last 2 exchanges max)
+        recent_history = history[-4:] if len(history) >= 4 else history
+        context = "\n".join([
+            f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg.get('content', '')[:200]}"
+            for msg in recent_history
+        ])
+        
+        prompt = f"""Given this conversation:
+{context}
 
-        import re
-        cleaned = re.sub(r"[^a-z0-9\s]", " ", message_lower).strip()
-        tokens = cleaned.split()
+New user message: "{message}"
 
-        if len(tokens) <= 6:
-            followup_markers = {
-                "more", "continue", "details", "detail", "elaborate", "expand",
-                "explain", "tell", "talk", "about", "it", "that", "this",
-                "ok", "okay", "please", "encore", "plus", "suite", "continue",
-                "ca", "ce", "cela", "explique", "peux"
-            }
-            if any(token in followup_markers for token in tokens):
-                return True
+Is this new message a follow-up question that needs the previous context to be understood, or is it a completely new topic?
 
-        if re.search(r"(tell\s+me\s+more|talk\s+more|more\s+about|continue|elaborate)", cleaned):
-            return True
-
-        if re.search(r"(plus\s+de\s+details|dis\s+m\s+en\s+plus|parle\s+plus|explique\s+plus)", cleaned):
-            return True
-
-        return False
+Answer only "FOLLOWUP" or "NEW_TOPIC"."""
+        
+        try:
+            response = self.llm_service._call_groq(prompt, max_tokens=20, temperature=0.0)
+            is_followup = response and "FOLLOWUP" in response.upper()
+            logger.debug(f"LLM follow-up detection: '{message[:60]}' -> {response} -> {is_followup}")
+            return is_followup
+        except Exception as e:
+            logger.error(f"Follow-up detection failed: {e}", exc_info=True)
+            # Fallback: treat very short messages as potential follow-ups
+            return len(message.split()) <= 5
 
     def _get_last_user_query(
         self,
@@ -415,22 +436,45 @@ class ChatService:
             content = (item.get("content") or "").strip()
             if not content:
                 continue
-            if self._is_followup(content) or self._is_greeting(content) or self._is_thanks(content):
+            if self._is_greeting(content) or self._is_thanks(content):
                 continue
             return content
         return None
 
-    def _build_followup_query(self, prior_query: Optional[str], followup: str) -> str:
-        """Combine prior query with follow-up to enrich retrieval."""
-        followup_clean = (followup or "").strip()
-        if not prior_query:
-            return followup_clean
+    def _get_last_assistant_response(self, history: List[Dict[str, Any]]) -> Optional[str]:
+        """Return the most recent assistant response."""
+        for item in reversed(history):
+            if item.get("role") == "assistant":
+                return (item.get("content") or "").strip()
+        return None
+    
+    def _rewrite_with_context(self, query: str, prior_query: str, prior_response: str) -> str:
+        """
+        Use LLM to rewrite follow-up query as standalone query.
+        Language-agnostic - works for any language (French, English, etc.).
+        """
+        # Truncate prior response to avoid token limits
+        prior_response_short = prior_response[:500] if prior_response else ""
+        
+        prompt = f"""Previous user question: "{prior_query}"
+Previous assistant response: "{prior_response_short}"
 
-        prior_clean = prior_query.strip()
-        if not prior_clean:
-            return followup_clean
+New user question: "{query}"
 
-        return f"{prior_clean}. Follow-up: {followup_clean}"
+Rewrite the new question as a complete, standalone question that includes all necessary context from the previous exchange. The rewritten question should be understandable without seeing the conversation history. Keep the same language as the user's question.
+
+Rewritten question:"""
+        
+        try:
+            response = self.llm_service._call_groq(prompt, max_tokens=200, temperature=0.3)
+            if response:
+                logger.debug(f"Query rewritten: '{query[:50]}' -> '{response[:80]}'")
+                return response
+        except Exception as e:
+            logger.error(f"Query rewriting failed: {e}", exc_info=True)
+        
+        # Fallback: simple concatenation
+        return f"{prior_query}. Follow-up: {query}"
     
     def get_history(
         self,
