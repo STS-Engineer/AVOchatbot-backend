@@ -161,13 +161,21 @@ class ChatService:
             conversation_key = self._normalize_conversation_id(conversation_id)
             history = self._get_history_list(conversation_key)
 
+            # Detailed logging for debugging
+            logger.info(f"Edit request - conversation_id: {conversation_id}, normalized: {conversation_key}")
+            logger.info(f"Edit request - message_index: {message_index}, history length: {len(history)}")
+            
             if message_index < 0 or message_index >= len(history):
-                raise ValueError("Message index out of range")
+                logger.error(f"Message index {message_index} out of range for history length {len(history)}")
+                logger.error(f"History roles: {[msg.get('role') for msg in history]}")
+                raise ValueError(f"Message index {message_index} out of range (history has {len(history)} messages)")
 
             if history[message_index].get("role") != "user":
+                logger.error(f"Cannot edit non-user message at index {message_index} (role: {history[message_index].get('role')})")
                 raise ValueError("Only user messages can be edited")
 
             # Update the user message and truncate any following messages
+            logger.info(f"Updating message at index {message_index} and truncating {len(history) - message_index - 1} following messages")
             history[message_index]["content"] = new_message
             history[message_index]["timestamp"] = datetime.now()
             del history[message_index + 1 :]
@@ -180,7 +188,7 @@ class ChatService:
             formatted_context = ""
             used_context_items: List[Dict[str, Any]] = []
             used_formatted_context = ""
-            is_followup = self._is_followup(new_message)
+            is_followup = self._is_followup(new_message, history)
 
             if is_followup:
                 prior_user_query = self._get_last_user_query(history, exclude_latest=True)
