@@ -19,9 +19,10 @@ class ChatService:
         self.llm_service = get_llm_service()
         self.embedding_service = get_embedding_service()
         self.conversation_history_by_id: Dict[str, List[Dict[str, Any]]] = {}
+        # Cache context per conversation, but allow using conversation history when KB returns nothing
         self.last_context_by_id: Dict[str, Optional[str]] = {}
         self.last_context_items_by_id: Dict[str, List[Dict[str, Any]]] = {}
-        logger.info("Chat Service initialized")
+        logger.info("Chat Service initialized with intelligent KB routing")
     
     def process_message(
         self,
@@ -31,7 +32,8 @@ class ChatService:
         conversation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Process a user message and return AI response with context.
+        Intelligent message processing: Let LLM decide when to search KB.
+        Flow: Check conversation context → Ask LLM if KB needed → Search if needed → Generate response
         
         Args:
             message: User's query/message
@@ -54,81 +56,52 @@ class ChatService:
                 "timestamp": datetime.now()
             })
             
-            context_items: List[Dict[str, Any]] = []
-            formatted_context = ""
+            # Get conversation context
+            history_for_prompt = self._get_history_window(history, exclude_latest=True)
+            last_context = self.last_context_by_id.get(conversation_key, "")
+            last_context_items = self.last_context_items_by_id.get(conversation_key, [])
+            
+            # STEP 1: Let LLM decide if we need to search KB
+            needs_kb_search = self._should_search_kb(message, history_for_prompt, last_context)
+            
             used_context_items: List[Dict[str, Any]] = []
             used_formatted_context = ""
+            search_query = message
             
-            # Check if this is a follow-up using LLM (language-agnostic)
-            is_followup = self._is_followup(message, history)
-            
-            # Prefer new retrieval for follow-ups using prior topic context
-            last_context_items = self.last_context_items_by_id.get(conversation_key, [])
-            last_context = self.last_context_by_id.get(conversation_key)
-
-            if is_followup:
-                # Get prior context for rewriting
-                prior_user_query = self._get_last_user_query(history, exclude_latest=True)
-                prior_assistant = self._get_last_assistant_response(history)
+            # STEP 2: Search KB only if needed
+            if needs_kb_search:
+                logger.info(f"KB search needed for: '{message[:80]}'")
                 
-                if prior_user_query and prior_assistant:
-                    logger.info(f"Follow-up detected for: '{message[:80]}'")
-                    # Use LLM to rewrite query with context (language-agnostic)
-                    combined_query = self._rewrite_with_context(message, prior_user_query, prior_assistant)
-                    logger.info(f"Rewritten query: '{combined_query[:120]}'")
-                else:
-                    logger.warning("Follow-up detected but context incomplete - using original query")
-                    combined_query = message
+                # For follow-up questions, enhance query with conversation context
+                if len(history_for_prompt) > 0:
+                    enhanced_query = self._enhance_query_with_context(message, history_for_prompt)
+                    if enhanced_query and enhanced_query != message:
+                        search_query = enhanced_query
+                        logger.info(f"Enhanced query: '{search_query[:120]}'")
                 
-                formatted_context, context_items = self.rag_service.retrieve_context(combined_query, k=top_k)
-
+                # Search KB
+                formatted_context, context_items = self.rag_service.retrieve_context(search_query, k=top_k)
+                
                 if context_items:
                     used_context_items = context_items
                     used_formatted_context = formatted_context
+                    # Cache for potential reuse
                     self.last_context_items_by_id[conversation_key] = context_items
                     self.last_context_by_id[conversation_key] = formatted_context
-                    logger.info(f"Retrieved {len(context_items)} new context items for follow-up message")
+                    logger.info(f"Retrieved {len(context_items)} KB items")
                 else:
-                    # Fallback: try with just the prior query's topics
-                    logger.info("No results with rewritten query, retrying with prior query as fallback")
-                    if prior_user_query:
-                        formatted_context, context_items = self.rag_service.retrieve_context(prior_user_query, k=top_k)
-                        if context_items:
-                            used_context_items = context_items
-                            used_formatted_context = formatted_context
-                            logger.info(f"Retrieved {len(context_items)} context items using prior query")
-                        elif last_context_items:
-                            # Last resort: use cached context
-                            used_context_items = last_context_items
-                            used_formatted_context = last_context or ""
-                            logger.info("Using cached context from previous exchange")
-                    elif last_context_items:
-                        used_context_items = last_context_items
-                        used_formatted_context = last_context or ""
-                        logger.info("Using cached context (no prior query available)")
+                    logger.info("No KB results found - will use conversation context")
+                    # Don't fail - let LLM use conversation history
             else:
-                logger.info(f"New query (not a follow-up): '{message[:80]}'")
-                # Retrieve context from knowledge base for new queries
-                formatted_context, context_items = self.rag_service.retrieve_context(message, k=top_k)
-
-                used_context_items = context_items
-                used_formatted_context = formatted_context
-
-                # Update last context only when new context is found
-                if context_items:
-                    self.last_context_items_by_id[conversation_key] = context_items
-                    self.last_context_by_id[conversation_key] = formatted_context
+                logger.info(f"KB search not needed - using conversation context: '{message[:80]}'")
+                # LLM can answer from conversation history without KB
             
-            # Generate response using LLM
-            history_for_prompt = self._get_history_window(history, exclude_latest=True)
-            last_assistant_response = self._get_last_assistant_response(history_for_prompt)
+            # STEP 3: Generate response with available context
             response = self.llm_service.generate_response(
                 message,
                 context=used_formatted_context,
-                allow_generic_guidance=True,
                 conversation_history=history_for_prompt,
-                last_assistant_response=last_assistant_response,
-                is_followup=is_followup,
+                has_kb_context=bool(used_context_items),
             )
             
             # Store assistant response in history
@@ -148,7 +121,7 @@ class ChatService:
                 "timestamp": datetime.now().isoformat()
             }
             
-            logger.info(f"Message processed successfully. Context items: {len(used_context_items)}")
+            logger.info(f"Message processed. KB items: {len(used_context_items)}")
             return result
         
         except Exception as e:
@@ -169,105 +142,72 @@ class ChatService:
         conversation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Edit a prior user message, truncate history, and regenerate the assistant response.
-        Intelligently handles message indices by finding user messages only.
+        Edit a prior user message, truncate history, and regenerate response.
+        Uses the same intelligent flow as process_message.
         """
         try:
             logger.info(f"Editing message at index {message_index}: {new_message[:100]}...")
 
             conversation_key = self._normalize_conversation_id(conversation_id)
             history = self._get_history_list(conversation_key)
-
-            # Detailed logging for debugging
-            logger.info(f"Edit request - conversation_id: {conversation_id}, normalized: {conversation_key}")
-            logger.info(f"Edit request - message_index: {message_index}, history length: {len(history)}")
-            logger.info(f"History roles: {[msg.get('role') for msg in history]}")
             
             # Find all user message indices
             user_message_indices = [i for i, msg in enumerate(history) if msg.get('role') == 'user']
             
             if not user_message_indices:
-                logger.error("No user messages found in history")
                 raise ValueError("No user messages to edit")
             
-            # Map frontend index (user message number) to backend history index
             if message_index < 0 or message_index >= len(user_message_indices):
-                logger.error(f"User message index {message_index} out of range (found {len(user_message_indices)} user messages)")
                 raise ValueError(f"Message index {message_index} out of range (history has {len(user_message_indices)} user messages)")
             
-            # Get the actual history index of the user message to edit
+            # Get the actual history index and update message
             actual_history_index = user_message_indices[message_index]
-            logger.info(f"Mapping user message index {message_index} to history index {actual_history_index}")
-
-            # Update the user message and truncate any following messages
-            logger.info(f"Updating message at history index {actual_history_index} and truncating {len(history) - actual_history_index - 1} following messages")
             history[actual_history_index]["content"] = new_message
             history[actual_history_index]["timestamp"] = datetime.now()
+            
+            # Truncate everything after this message
             del history[actual_history_index + 1 :]
 
-            # Reset cached context for this conversation
+            # Clear cached context
             self.last_context_by_id.pop(conversation_key, None)
             self.last_context_items_by_id.pop(conversation_key, None)
 
-            context_items: List[Dict[str, Any]] = []
-            formatted_context = ""
+            # Get conversation context
+            history_for_prompt = self._get_history_window(history, exclude_latest=True)
+            last_context = self.last_context_by_id.get(conversation_key, "")
+            
+            # Use same intelligent processing as regular messages
+            needs_kb_search = self._should_search_kb(new_message, history_for_prompt, last_context)
+            
             used_context_items: List[Dict[str, Any]] = []
             used_formatted_context = ""
+            search_query = new_message
             
-            # Check if this is a follow-up after edit
-            is_followup = self._is_followup(new_message, history)
-
-            if is_followup:
-                # Get context from previous exchange for better query rewriting
-                prior_user_query = self._get_last_user_query(history, exclude_latest=True)
-                prior_assistant = self._get_last_assistant_response(history)
+            if needs_kb_search:
+                logger.info(f"KB search needed for edited message")
                 
-                if prior_user_query and prior_assistant:
-                    logger.info(f"Follow-up detected after edit: '{new_message[:80]}'")
-                    # Use intelligent rewriting with full context
-                    combined_query = self._rewrite_with_context(new_message, prior_user_query, prior_assistant)
-                    logger.info(f"Rewritten query for edit: '{combined_query[:120]}'")
-                else:
-                    logger.warning("Follow-up detected but context incomplete - using original query")
-                    combined_query = new_message
+                # Enhance query if there's conversation context
+                if len(history_for_prompt) > 0:
+                    enhanced_query = self._enhance_query_with_context(new_message, history_for_prompt)
+                    if enhanced_query and enhanced_query != new_message:
+                        search_query = enhanced_query
                 
-                formatted_context, context_items = self.rag_service.retrieve_context(combined_query, k=top_k)
-
+                formatted_context, context_items = self.rag_service.retrieve_context(search_query, k=top_k)
+                
                 if context_items:
                     used_context_items = context_items
                     used_formatted_context = formatted_context
                     self.last_context_items_by_id[conversation_key] = context_items
                     self.last_context_by_id[conversation_key] = formatted_context
-                    logger.info(f"Retrieved {len(context_items)} context items for edited follow-up message")
-                else:
-                    # Fallback: try with just the prior query's topics
-                    if prior_user_query:
-                        logger.info("Retrying with prior query as fallback")
-                        formatted_context, context_items = self.rag_service.retrieve_context(prior_user_query, k=top_k)
-                        if context_items:
-                            used_context_items = context_items
-                            used_formatted_context = formatted_context
             else:
-                # New query - retrieve fresh context
-                logger.info(f"New query after edit (not a follow-up): '{new_message[:80]}'")
-                formatted_context, context_items = self.rag_service.retrieve_context(new_message, k=top_k)
+                logger.info(f"KB search not needed - using conversation context")
 
-                used_context_items = context_items
-                used_formatted_context = formatted_context
-
-                if context_items:
-                    self.last_context_items_by_id[conversation_key] = context_items
-                    self.last_context_by_id[conversation_key] = formatted_context
-
-            history_for_prompt = self._get_history_window(history, exclude_latest=True)
-            last_assistant_response = self._get_last_assistant_response(history_for_prompt)
+            # Generate response
             response = self.llm_service.generate_response(
                 new_message,
                 context=used_formatted_context,
-                allow_generic_guidance=True,
                 conversation_history=history_for_prompt,
-                last_assistant_response=last_assistant_response,
-                is_followup=is_followup,
+                has_kb_context=bool(used_context_items),
             )
 
             history.append({
@@ -286,7 +226,7 @@ class ChatService:
                 "timestamp": datetime.now().isoformat()
             }
 
-            logger.info(f"Edited message processed successfully. Context items: {len(used_context_items)}")
+            logger.info(f"Edited message processed. KB items: {len(used_context_items)}")
             return result
 
         except Exception as e:
@@ -298,359 +238,105 @@ class ChatService:
                 "timestamp": datetime.now().isoformat()
             }
     
-    def _is_greeting(self, message: str) -> bool:
+    def _should_search_kb(self, message: str, history: List[Dict[str, Any]], last_context: str) -> bool:
         """
-        Detect if the message is a simple greeting.
-        
-        Args:
-            message: User's message
+        Intelligent KB search decision: Let LLM decide if we need KB or can use conversation.
+        Reduces hard-coding and makes the system more flexible.
         
         Returns:
-            True if the message is a greeting, False otherwise
+            True if KB search needed, False if conversation context sufficient
         """
-        greetings = [
-            "hello", "hi", "hey", "greetings", "hola", "bonjour",
-            "yo", "sup", "howdy", "morning", "afternoon", "evening",
-            "good morning", "good afternoon", "good evening",
-            "what's up", "whats up", "g'day", "gday"
-        ]
-
+        # Simple heuristics for obvious cases (minimal hard-coding)
         message_lower = message.strip().lower()
-        if not message_lower:
+        
+        # Very short/casual messages probably don't need KB
+        if len(message.split()) <= 2 and not any(q in message_lower for q in ['what', 'how', 'why', 'when', 'where', 'who']):
             return False
-
-        import re
-        clean_message = re.sub(r"[^a-z0-9\s]", " ", message_lower).strip()
-        if not clean_message:
-            return False
-
-        # Exact or short greeting (e.g., "hi", "hello team", "good morning")
-        if clean_message in greetings:
-            return True
-
-        tokens = clean_message.split()
-        if not tokens:
-            return False
-
-        simple_greetings = {"hello", "hi", "hey", "yo", "sup", "greetings", "howdy","Bonjour"}
-        if tokens[0] in simple_greetings and len(tokens) <= 4:
-            non_greeting_tokens = {
-                "can", "could", "please", "help", "what", "why", "how",
-                "where", "when", "who", "tell", "explain", "show", "need"
-            }
-            if any(token in non_greeting_tokens for token in tokens[1:]):
-                return False
-            return True
-
-        if "good morning" in clean_message or "good afternoon" in clean_message or "good evening" in clean_message:
-            return len(tokens) <= 4
-
-        if "what's up" in clean_message or "whats up" in clean_message:
-            return len(tokens) <= 4
-
-        return False
-
-    def _greeting_response(self) -> str:
-        """Return a friendly greeting response."""
-        return (
-            "Hello! How can I help you today? "
-            "You can ask about policies, procedures, or any internal guidance."
-        )
-
-    def _is_thanks(self, message: str) -> bool:
-        """Detect a short thank-you message."""
-        message_lower = message.strip().lower()
-        if not message_lower:
-            return False
-
-        import re
-        clean_message = re.sub(r"[^a-z0-9\s]", " ", message_lower).strip()
-        if not clean_message:
-            return False
-
-        tokens = clean_message.split()
-        if not tokens:
-            return False
-
-        thanks_tokens = {
-            "thanks", "thank", "thankyou", "thx", "ty", "merci", "thanks!",
-        }
-
-        if clean_message in {"thank you", "thanks", "thanks a lot", "thank you!", "merci"}:
-            return True
-
-        if tokens[0] in thanks_tokens and len(tokens) <= 4:
-            return True
-
-        if "thank you" in clean_message and len(tokens) <= 6:
-            return True
-
-        return False
-
-    def _thanks_response(self) -> str:
-        """Return a brief thank-you response."""
-        return "Thank you!"
-
-    def _is_vague_advice_request(self, message: str) -> bool:
-        """Detect short, vague requests for advice without a topic."""
-        message_lower = message.strip().lower()
-        if not message_lower:
-            return False
-
-        import re
-        clean_message = re.sub(r"[^a-z0-9\s]", " ", message_lower).strip()
-        if not clean_message:
-            return False
-
-        tokens = clean_message.split()
-        if len(tokens) > 6:
-            return False
-
-        vague_phrases = {
-            "i need your advice",
-            "need advice",
-            "i need advice",
-            "i want advice",
-            "can you advise",
-            "can you give advice",
-            "advice please",
-            "need help",
-            "i need help",
-        }
-
-        if clean_message in vague_phrases:
-            return True
-
-        if "advice" in tokens and len(tokens) <= 4:
-            return True
-
-        return False
-
-    def _is_interpersonal(self, message: str) -> bool:
-        """Detect interpersonal workplace situations."""
-        message_lower = message.strip().lower()
-        if not message_lower:
-            return False
-
-        keywords = [
-            "colleague", "coworker", "co-worker", "manager", "team", "conflict",
-            "sarcastic", "rude", "disrespect", "behavior", "harassment",
-            "collegue", "collègue", "equipe", "équipe", "conflit", "comportement",
-            "sarcastique", "difficile", "tendu", "tension"
-        ]
-
-        return any(word in message_lower for word in keywords)
-
-    def _is_followup(self, message: str, history: List[Dict[str, Any]]) -> bool:
-        """
-        Intelligent LLM-based follow-up detection using topic extraction and semantic analysis.
-        No pattern matching - pure AI understanding of conversation continuity.
-        """
-        # Need at least one prior exchange to have a follow-up
+        
+        # If no conversation history, search KB
         if not history or len(history) < 2:
-            return False
-        
-        # Get the last user-assistant exchange for topic analysis
-        last_user_msg = self._get_last_user_query(history, exclude_latest=True)
-        last_assistant_msg = self._get_last_assistant_response(history)
-        
-        if not last_user_msg or not last_assistant_msg:
-            logger.debug("No prior exchange found for follow-up detection")
-            return False
-        
-        # Use LLM to extract the main topic from previous conversation and compare
-        prompt = f"""Analyze this conversation to determine if the new message is a follow-up.
-
-Previous exchange:
-User: "{last_user_msg}"
-Assistant: "{last_assistant_msg[:400]}"
-
-New user message: "{message}"
-
-Task: Determine if the new message is about the SAME TOPIC as the previous exchange or a DIFFERENT TOPIC.
-
-Analysis criteria:
-1. Topic Continuity: Does the new message discuss the same subject, concept, or domain?
-   - Example: Previous about "SBA loans" → New asks "what are the steps" → SAME TOPIC (SBA)
-   - Example: Previous about "leave policy" → New asks "what is health insurance" → DIFFERENT TOPIC
-
-2. Semantic Relationship: Is the new question conceptually related to what was just discussed?
-   - Asking for more details, steps, examples, clarifications → Usually SAME TOPIC
-   - Introducing a new subject matter entirely → DIFFERENT TOPIC
-
-3. Contextual Dependency: Does the new message need the previous context to be understood?
-   - Uses references like "it", "that", "these steps" → SAME TOPIC
-   - Self-contained question on different subject → DIFFERENT TOPIC
-
-Be intelligent about topic boundaries:
-- "What is X?" followed by "What about Y?" -> If X and Y are related concepts (e.g., both insurance types), treat as SAME TOPIC
-- If Y is completely unrelated to X (different business domain), treat as DIFFERENT TOPIC
-
-Respond with ONLY one of these exact phrases:
-- "SAME_TOPIC" if the new message continues the previous conversation
-- "DIFFERENT_TOPIC" if the new message introduces a new subject"""
-        
-        try:
-            # Increased max_tokens to give model more room to respond reliably
-            response = self.llm_service._call_groq(prompt, max_tokens=50, temperature=0.0)
-            
-            # Handle None or empty responses gracefully
-            if not response or not response.strip():
-                logger.warning(f"LLM returned empty response for follow-up detection, using fallback")
-                return self._is_followup_by_similarity(message, last_user_msg, last_assistant_msg)
-            
-            is_followup = "SAME_TOPIC" in response.upper()
-            
-            logger.info(f"Intelligent follow-up detection: '{message[:60]}' | LLM: {response.strip()} | Result: {'FOLLOWUP' if is_followup else 'NEW_QUERY'}")
-            return is_followup
-            
-        except Exception as e:
-            logger.error(f"LLM-based follow-up detection failed: {e}", exc_info=True)
-            # Fallback: Use semantic similarity with embeddings
-            return self._is_followup_by_similarity(message, last_user_msg, last_assistant_msg)
-
-    def _is_followup_by_similarity(
-        self, 
-        message: str, 
-        last_user_msg: str, 
-        last_assistant_msg: str
-    ) -> bool:
-        """
-        Fallback: Use embedding similarity to detect follow-ups when LLM fails.
-        Compares semantic similarity between current and previous messages.
-        Also uses linguistic heuristics for generic follow-up phrases.
-        """
-        # First check: Is the message a generic continuation phrase?
-        message_lower = message.lower().strip()
-        generic_followup_patterns = [
-            "what are the", "how does", "can you explain", "tell me more",
-            "what about the", "and the", "more details", "steps", "process",
-            "quelles sont les", "comment", "expliquez", "étapes", "processus",
-            "et les", "plus de détails"
-        ]
-        
-        # If message is generic AND short, it's likely a follow-up
-        is_generic = any(pattern in message_lower for pattern in generic_followup_patterns)
-        is_short = len(message.split()) <= 10
-        
-        if is_generic and is_short:
-            logger.info(f"Generic follow-up phrase detected: '{message[:60]}' -> FOLLOWUP")
             return True
         
+        # Let LLM decide based on conversation context
+        history_summary = self._format_recent_history(history[-4:])  # Last 2 exchanges
+        
+        prompt = f"""Analyze if this question needs knowledge base search or can be answered from conversation.
+
+Conversation history:
+{history_summary}
+
+New question: "{message}"
+
+Decision criteria:
+- If question is NEW topic → KB_SEARCH
+- If question is about SAME topic (follow-up, clarification, elaboration) → USE_CONVERSATION
+- If asking for more details on what was just discussed → USE_CONVERSATION
+- If question references "this", "that", "it", "these" → USE_CONVERSATION
+- If completely different subject → KB_SEARCH
+
+Respond with ONLY:
+- "KB_SEARCH" if need to search knowledge base
+- "USE_CONVERSATION" if can answer from conversation history"""
+        
         try:
-            # Embed current message and previous context
-            current_embedding = self.embedding_service.embed_text(message)
-            # Combine previous user and assistant for context
-            previous_context = f"{last_user_msg} {last_assistant_msg[:300]}"
-            previous_embedding = self.embedding_service.embed_text(previous_context)
-            
-            # Calculate cosine similarity
-            import numpy as np
-            current_vec = np.array(current_embedding)
-            previous_vec = np.array(previous_embedding)
-            
-            similarity = np.dot(current_vec, previous_vec) / (
-                np.linalg.norm(current_vec) * np.linalg.norm(previous_vec)
-            )
-            
-            # Adaptive threshold: lower for generic questions
-            base_threshold = 0.50  # Lowered from 0.65 to catch more follow-ups
-            threshold = 0.35 if is_generic else base_threshold
-            is_followup = similarity > threshold
-            
-            logger.info(f"Similarity-based follow-up detection: {similarity:.3f} (threshold: {threshold}, generic: {is_generic}) -> {'FOLLOWUP' if is_followup else 'NEW_QUERY'}")
-            return is_followup
-            
+            response = self.llm_service._call_groq(prompt, max_tokens=20, temperature=0.0)
+            if response and "USE_CONVERSATION" in response.upper():
+                logger.info(f"LLM decision: Use conversation context (no KB search)")
+                return False
+            logger.info(f"LLM decision: Search KB")
+            return True
         except Exception as e:
-            logger.error(f"Similarity-based follow-up detection failed: {e}", exc_info=True)
-            # Last resort: generic questions are likely follow-ups if recent context exists
-            if is_generic:
-                logger.debug(f"Fallback: treating generic question as FOLLOWUP")
-                return True
-            # Very short messages might be follow-ups
-            is_followup = len(message.split()) <= 5
-            logger.debug(f"Final fallback: message length {len(message.split())} words -> {'FOLLOWUP' if is_followup else 'NEW_QUERY'}")
-            return is_followup
+            logger.warning(f"KB decision failed, defaulting to search: {e}")
+            return True  # Safe default
     
-    def _get_last_user_query(
-        self,
-        history: List[Dict[str, Any]],
-        exclude_latest: bool = False,
-    ) -> Optional[str]:
-        """Return the most recent substantive user query."""
+    def _enhance_query_with_context(self, message: str, history: List[Dict[str, Any]]) -> str:
+        """
+        Enhance vague follow-up queries with conversation context.
+        Only when needed - minimal intervention.
+        """
+        # Get recent context
+        recent = history[-2:] if len(history) >= 2 else history
+        if not recent:
+            return message
+        
+        history_summary = self._format_recent_history(recent)
+        
+        prompt = f"""Rewrite this follow-up question to be standalone and searchable.
+
+Recent conversation:
+{history_summary}
+
+Follow-up question: "{message}"
+
+Task: Rewrite to include the topic from conversation. Keep it concise (max 15 words).
+
+Rewritten query:"""
+        
+        try:
+            response = self.llm_service._call_groq(prompt, max_tokens=50, temperature=0.2)
+            if response and len(response.strip()) > 0:
+                return response.strip()
+        except Exception as e:
+            logger.warning(f"Query enhancement failed: {e}")
+        
+        return message
+    
+    def _format_recent_history(self, history: List[Dict[str, Any]]) -> str:
+        """Format recent conversation for LLM context."""
         if not history:
-            return None
-
-        items = history[:-1] if exclude_latest else history
-        for item in reversed(items):
-            if item.get("role") != "user":
-                continue
-            content = (item.get("content") or "").strip()
-            if not content:
-                continue
-            if self._is_greeting(content) or self._is_thanks(content):
-                continue
-            return content
-        return None
-
-    def _get_last_assistant_response(self, history: List[Dict[str, Any]]) -> Optional[str]:
-        """Return the most recent assistant response."""
-        for item in reversed(history):
-            if item.get("role") == "assistant":
-                return (item.get("content") or "").strip()
-        return None
-    
-    def _rewrite_with_context(self, query: str, prior_query: str, prior_response: str) -> str:
-        """
-        Use LLM to rewrite follow-up query as standalone query with topic preservation.
-        Language-agnostic - works for any language (French, English, etc.).
-        Intelligently extracts topics and maintains conversation context.
-        """
-        # Truncate prior response but keep enough context
-        prior_response_short = prior_response[:800] if prior_response else ""
+            return "(no history)"
         
-        prompt = f"""Conversation context:
-User previously asked: "{prior_query}"
-Assistant responded about: "{prior_response_short}"
-
-New user question: "{query}"
-
-Task: Rewrite the new question to be a complete, standalone search query that:
-1. Preserves the EXACT TOPIC from the previous conversation
-2. Incorporates the specific aspect the user is now asking about
-3. Maintains the same language as the user's question
-4. Is optimized for searching a knowledge base
-
-Important: Keep the topic focus from the previous exchange. If the previous conversation was about "SBA", the rewritten query must also be about "SBA".
-
-Rewritten standalone search query:"""
+        lines = []
+        for msg in history:
+            role = msg.get('role', '').upper()
+            content = msg.get('content', '').strip()
+            if content:
+                # Truncate long messages
+                content = content[:200] + "..." if len(content) > 200 else content
+                lines.append(f"{role}: {content}")
         
-        try:
-            response = self.llm_service._call_groq(prompt, max_tokens=250, temperature=0.2)
-            if response:
-                rewritten = response.strip()
-                logger.info(f"Query rewritten: '{query[:60]}' -> '{rewritten[:100]}'")
-                
-                # Validate the rewrite maintains topic relevance
-                # Extract key terms from prior query
-                prior_terms = set(prior_query.lower().split())
-                rewritten_terms = set(rewritten.lower().split())
-                
-                # Check if rewrite shares some key terms with prior context
-                if len(prior_terms & rewritten_terms) > 0 or len(rewritten.split()) > len(query.split()):
-                    return rewritten
-                else:
-                    logger.warning(f"Rewrite lost context, using enhanced fallback")
-                    # Better fallback that preserves topic
-                    return f"{prior_query} - {query}"
-            
-        except Exception as e:
-            logger.error(f"Query rewriting failed: {e}", exc_info=True)
-        
-        # Enhanced fallback: preserve topic from prior query
-        logger.info("Using fallback query combining prior and current")
-        return f"{prior_query} - {query}"
-    
+        return "\n".join(lines) if lines else "(no history)"
+
     def get_history(
         self,
         limit: int = 50,
