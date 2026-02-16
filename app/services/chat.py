@@ -8,58 +8,78 @@ from loguru import logger
 from app.services.rag import get_rag_service
 from app.services.llm import get_llm_service
 from app.services.embedding import get_embedding_service
+from app.services.conversation import get_conversation_service
 
 
 class ChatService:
-    """Main chat service orchestrating RAG and LLM."""
+    """Main chat service orchestrating RAG and LLM with database persistence."""
     
     def __init__(self):
         """Initialize chat service."""
         self.rag_service = get_rag_service()
         self.llm_service = get_llm_service()
         self.embedding_service = get_embedding_service()
-        self.conversation_history_by_id: Dict[str, List[Dict[str, Any]]] = {}
-        # Cache context per conversation, but allow using conversation history when KB returns nothing
+        self.conversation_service = get_conversation_service()
+        
+        # Keep minimal in-memory cache for context (not for messages)
         self.last_context_by_id: Dict[str, Optional[str]] = {}
         self.last_context_items_by_id: Dict[str, List[Dict[str, Any]]] = {}
-        logger.info("Chat Service initialized with intelligent KB routing")
+        
+        logger.info("Chat Service initialized with database persistence")
     
     def process_message(
         self,
         message: str,
+        user_id: str,
         top_k: Optional[int] = None,
         include_context: bool = True,
         conversation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Intelligent message processing: Let LLM decide when to search KB.
-        Flow: Check conversation context → Ask LLM if KB needed → Search if needed → Generate response
+        Intelligent message processing with database persistence.
+        Flow: Get/Create conversation → Load history → Process message → Save to DB
         
         Args:
             message: User's query/message
+            user_id: Authenticated user ID
             top_k: Number of context items to retrieve
             include_context: Whether to include context in response
+            conversation_id: Optional conversation ID (creates new if None)
         
         Returns:
             Dictionary with success status, message, context, and metadata
         """
         try:
-            logger.info(f"Processing message: {message[:100]}...")
+            logger.info(f"Processing message for user {user_id}: {message[:100]}...")
             
-            conversation_key = self._normalize_conversation_id(conversation_id)
-            history = self._get_history_list(conversation_key)
-
-            # Store user message in history
-            history.append({
-                "role": "user",
-                "content": message,
-                "timestamp": datetime.now()
-            })
+            # Get or create conversation
+            if not conversation_id:
+                # Auto-generate title from first message
+                title = message[:50] + "..." if len(message) > 50 else message
+                conversation_id = self.conversation_service.create_conversation(user_id, title)
+                if not conversation_id:
+                    raise Exception("Failed to create conversation")
+                logger.info(f"Created new conversation: {conversation_id}")
+            else:
+                # Validate conversation ownership
+                conv = self.conversation_service.get_conversation(conversation_id, user_id)
+                if not conv:
+                    raise Exception("Conversation not found or access denied")
             
-            # Get conversation context
+            # Store user message in database
+            user_message_id = self.conversation_service.add_message(
+                conversation_id=conversation_id,
+                role="user",
+                content=message
+            )
+            
+            if not user_message_id:
+                raise Exception("Failed to store user message")
+            
+            # Load conversation history from database
+            history = self._load_history_from_db(conversation_id)
             history_for_prompt = self._get_history_window(history, exclude_latest=True)
-            last_context = self.last_context_by_id.get(conversation_key, "")
-            last_context_items = self.last_context_items_by_id.get(conversation_key, [])
+            last_context = self.last_context_by_id.get(conversation_id, "")
             
             # STEP 1: Let LLM decide if we need to search KB
             needs_kb_search = self._should_search_kb(message, history_for_prompt, last_context)
@@ -86,15 +106,13 @@ class ChatService:
                     used_context_items = context_items
                     used_formatted_context = formatted_context
                     # Cache for potential reuse
-                    self.last_context_items_by_id[conversation_key] = context_items
-                    self.last_context_by_id[conversation_key] = formatted_context
+                    self.last_context_items_by_id[conversation_id] = context_items
+                    self.last_context_by_id[conversation_id] = formatted_context
                     logger.info(f"Retrieved {len(context_items)} KB items")
                 else:
                     logger.info("No KB results found - will use conversation context")
-                    # Don't fail - let LLM use conversation history
             else:
                 logger.info(f"KB search not needed - using conversation context: '{message[:80]}'")
-                # LLM can answer from conversation history without KB
             
             # STEP 3: Generate response with available context
             response = self.llm_service.generate_response(
@@ -104,13 +122,22 @@ class ChatService:
                 has_kb_context=bool(used_context_items),
             )
             
-            # Store assistant response in history
-            history.append({
-                "role": "assistant",
-                "content": response,
-                "timestamp": datetime.now(),
-                "context_count": len(used_context_items)
-            })
+            # Store assistant response in database
+            assistant_message_id = self.conversation_service.add_message(
+                conversation_id=conversation_id,
+                role="assistant",
+                content=response,
+                context_used=used_formatted_context if used_formatted_context else None,
+                context_count=len(used_context_items)
+            )
+            
+            if used_context_items and assistant_message_id:
+                # Store context items for tracking
+                logger.debug(f"Context items before storage (first item): {used_context_items[0] if used_context_items else 'none'}")
+                self.conversation_service.store_message_context_items(
+                    assistant_message_id,
+                    used_context_items
+                )
             
             result = {
                 "success": True,
@@ -118,6 +145,7 @@ class ChatService:
                 "context": used_formatted_context if include_context and used_formatted_context else None,
                 "context_items": used_context_items if include_context and used_context_items else None,
                 "context_count": len(used_context_items),
+                "conversation_id": conversation_id,
                 "timestamp": datetime.now().isoformat()
             }
             
@@ -137,44 +165,56 @@ class ChatService:
         self,
         message_index: int,
         new_message: str,
+        user_id: str,
         top_k: Optional[int] = None,
         include_context: bool = True,
         conversation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Edit a prior user message, truncate history, and regenerate response.
-        Uses the same intelligent flow as process_message.
+        Uses database persistence.
         """
         try:
             logger.info(f"Editing message at index {message_index}: {new_message[:100]}...")
 
-            conversation_key = self._normalize_conversation_id(conversation_id)
-            history = self._get_history_list(conversation_key)
+            if not conversation_id:
+                raise ValueError("conversation_id is required for editing messages")
+            
+            # Validate conversation ownership
+            conv = self.conversation_service.get_conversation(conversation_id, user_id)
+            if not conv:
+                raise ValueError("Conversation not found or access denied")
+            
+            # Load messages from database
+            messages = self.conversation_service.get_messages(conversation_id, limit=1000)
             
             # Find all user message indices
-            user_message_indices = [i for i, msg in enumerate(history) if msg.get('role') == 'user']
+            user_messages = [(i, msg) for i, msg in enumerate(messages) if msg.get('role') == 'user']
             
-            if not user_message_indices:
+            if not user_messages:
                 raise ValueError("No user messages to edit")
             
-            if message_index < 0 or message_index >= len(user_message_indices):
-                raise ValueError(f"Message index {message_index} out of range (history has {len(user_message_indices)} user messages)")
+            if message_index < 0 or message_index >= len(user_messages):
+                raise ValueError(f"Message index {message_index} out of range (history has {len(user_messages)} user messages)")
             
-            # Get the actual history index and update message
-            actual_history_index = user_message_indices[message_index]
-            history[actual_history_index]["content"] = new_message
-            history[actual_history_index]["timestamp"] = datetime.now()
+            # Get the actual message and its ID
+            _, message_to_edit = user_messages[message_index]
+            message_id = str(message_to_edit['id'])
             
-            # Truncate everything after this message
-            del history[actual_history_index + 1 :]
-
+            # Update the message in database
+            self.conversation_service.update_message(message_id, new_message)
+            
+            # Delete all messages after this one
+            self.conversation_service.delete_messages_after(conversation_id, message_id)
+            
             # Clear cached context
-            self.last_context_by_id.pop(conversation_key, None)
-            self.last_context_items_by_id.pop(conversation_key, None)
-
-            # Get conversation context
+            self.last_context_by_id.pop(conversation_id, None)
+            self.last_context_items_by_id.pop(conversation_id, None)
+            
+            # Load updated history
+            history = self._load_history_from_db(conversation_id)
             history_for_prompt = self._get_history_window(history, exclude_latest=True)
-            last_context = self.last_context_by_id.get(conversation_key, "")
+            last_context = self.last_context_by_id.get(conversation_id, "")
             
             # Use same intelligent processing as regular messages
             needs_kb_search = self._should_search_kb(new_message, history_for_prompt, last_context)
@@ -197,8 +237,8 @@ class ChatService:
                 if context_items:
                     used_context_items = context_items
                     used_formatted_context = formatted_context
-                    self.last_context_items_by_id[conversation_key] = context_items
-                    self.last_context_by_id[conversation_key] = formatted_context
+                    self.last_context_items_by_id[conversation_id] = context_items
+                    self.last_context_by_id[conversation_id] = formatted_context
             else:
                 logger.info(f"KB search not needed - using conversation context")
 
@@ -210,12 +250,20 @@ class ChatService:
                 has_kb_context=bool(used_context_items),
             )
 
-            history.append({
-                "role": "assistant",
-                "content": response,
-                "timestamp": datetime.now(),
-                "context_count": len(used_context_items)
-            })
+            # Store assistant response in database
+            assistant_message_id = self.conversation_service.add_message(
+                conversation_id=conversation_id,
+                role="assistant",
+                content=response,
+                context_used=used_formatted_context if used_formatted_context else None,
+                context_count=len(used_context_items)
+            )
+            
+            if used_context_items and assistant_message_id:
+                self.conversation_service.store_message_context_items(
+                    assistant_message_id,
+                    used_context_items
+                )
 
             result = {
                 "success": True,
@@ -223,6 +271,7 @@ class ChatService:
                 "context": used_formatted_context if include_context and used_formatted_context else None,
                 "context_items": used_context_items if include_context and used_context_items else None,
                 "context_count": len(used_context_items),
+                "conversation_id": conversation_id,
                 "timestamp": datetime.now().isoformat()
             }
 
@@ -237,6 +286,22 @@ class ChatService:
                 "message": "An error occurred while editing your message. Please try again.",
                 "timestamp": datetime.now().isoformat()
             }
+    
+    def _load_history_from_db(self, conversation_id: str) -> List[Dict[str, Any]]:
+        """Load conversation history from database."""
+        messages = self.conversation_service.get_messages(conversation_id, limit=100)
+        
+        # Convert to the format expected by the LLM service
+        history = []
+        for msg in messages:
+            history.append({
+                "role": msg["role"],
+                "content": msg["content"],
+                "timestamp": msg["created_at"],
+                "context_count": msg.get("context_count", 0)
+            })
+        
+        return history
     
     def _should_search_kb(self, message: str, history: List[Dict[str, Any]], last_context: str) -> bool:
         """
@@ -339,14 +404,17 @@ Rewritten query:"""
 
     def get_history(
         self,
+        user_id: str,
+        conversation_id: str,
         limit: int = 50,
         offset: int = 0,
-        conversation_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Get conversation history with pagination.
+        Get conversation history from database with pagination.
         
         Args:
+            user_id: User ID (for ownership validation)
+            conversation_id: Conversation ID
             limit: Maximum number of messages to return
             offset: Number of messages to skip
         
@@ -354,57 +422,62 @@ Rewritten query:"""
             List of conversation messages
         """
         try:
-            conversation_key = self._normalize_conversation_id(conversation_id)
-            history = self._get_history_list(conversation_key)
-
-            start = max(0, len(history) - limit - offset)
-            end = max(0, len(history) - offset)
-
-            history_slice = history[start:end]
+            # Validate conversation ownership
+            conv = self.conversation_service.get_conversation(conversation_id, user_id)
+            if not conv:
+                logger.warning(f"Access denied to conversation {conversation_id} for user {user_id}")
+                return []
             
-            # Convert datetime objects to ISO format strings
-            for msg in history_slice:
-                if isinstance(msg.get('timestamp'), datetime):
-                    msg['timestamp'] = msg['timestamp'].isoformat()
+            # Get messages from database
+            messages = self.conversation_service.get_messages(conversation_id, limit=limit, offset=offset)
             
-            return history_slice
+            # Convert to expected format
+            history = []
+            for msg in messages:
+                history.append({
+                    "role": msg["role"],
+                    "content": msg["content"],
+                    "timestamp": msg["created_at"].isoformat() if isinstance(msg["created_at"], datetime) else msg["created_at"],
+                    "context_count": msg.get("context_count", 0)
+                })
+            
+            return history
         except Exception as e:
             logger.error(f"Error retrieving history: {e}")
             return []
     
-    def clear_history(self, conversation_id: Optional[str] = None) -> bool:
-        """Clear conversation history."""
+    def clear_history(self, user_id: str, conversation_id: Optional[str] = None) -> bool:
+        """Clear conversation history in database."""
         try:
-            conversation_key = self._normalize_conversation_id(conversation_id)
-            if conversation_id is None:
-                self.conversation_history_by_id = {}
-                self.last_context_by_id = {}
-                self.last_context_items_by_id = {}
-                logger.info("All conversation history cleared")
-                return True
-
-            self.conversation_history_by_id.pop(conversation_key, None)
-            self.last_context_by_id.pop(conversation_key, None)
-            self.last_context_items_by_id.pop(conversation_key, None)
-            logger.info(f"Conversation history cleared for {conversation_key}")
-            return True
+            if conversation_id:
+                # Delete specific conversation
+                success = self.conversation_service.delete_conversation(conversation_id, user_id)
+                if success:
+                    # Clear cache
+                    self.last_context_by_id.pop(conversation_id, None)
+                    self.last_context_items_by_id.pop(conversation_id, None)
+                    logger.info(f"Conversation deleted: {conversation_id}")
+                return success
+            else:
+                # Delete all conversations for user (not typically used, but available)
+                logger.warning(f"Clearing all conversations for user {user_id} - this is a destructive operation")
+                return False  # Disabled for safety - should be done explicitly
         except Exception as e:
             logger.error(f"Error clearing history: {e}")
             return False
     
-    def get_history_count(self, conversation_id: Optional[str] = None) -> int:
-        """Get total number of messages in history."""
-        conversation_key = self._normalize_conversation_id(conversation_id)
-        return len(self._get_history_list(conversation_key))
-
-    def _normalize_conversation_id(self, conversation_id: Optional[str]) -> str:
-        cleaned = (conversation_id or "").strip()
-        return cleaned or "default"
-
-    def _get_history_list(self, conversation_id: str) -> List[Dict[str, Any]]:
-        if conversation_id not in self.conversation_history_by_id:
-            self.conversation_history_by_id[conversation_id] = []
-        return self.conversation_history_by_id[conversation_id]
+    def get_history_count(self, user_id: str, conversation_id: str) -> int:
+        """Get total number of messages in conversation."""
+        try:
+            # Validate ownership
+            conv = self.conversation_service.get_conversation(conversation_id, user_id)
+            if not conv:
+                return 0
+            
+            return self.conversation_service.get_message_count(conversation_id)
+        except Exception as e:
+            logger.error(f"Error getting history count: {e}")
+            return 0
 
     def _get_history_window(
         self,

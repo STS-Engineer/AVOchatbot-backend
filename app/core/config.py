@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     TOP_K_RESULTS: int = 8
     SIMILARITY_THRESHOLD: float = 0.4  # Raised from 0.2 to reduce false positives
     
+    # Authentication / JWT
+    JWT_SECRET_KEY: str = "your-secret-key-change-in-production"  # Should be in .env
+    JWT_ALGORITHM: str = "HS256"
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30  # 30 minutes
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7  # 7 days
+    
     # CORS
     ALLOWED_ORIGINS: List[str] = [
         "http://localhost:5173",

@@ -105,6 +105,7 @@ class ChatResponse(BaseModel):
     context: Optional[str] = Field(None, description="Formatted knowledge base context")
     context_items: Optional[List[ContextItem]] = Field(None, description="Retrieved context items")
     context_count: Optional[int] = Field(None, description="Number of context items retrieved")
+    conversation_id: Optional[str] = Field(None, description="Current conversation ID")
     error: Optional[str] = Field(None, description="Error message if unsuccessful")
     timestamp: datetime = Field(default_factory=datetime.now, description="Response timestamp")
     
@@ -116,6 +117,7 @@ class ChatResponse(BaseModel):
                 "context": "Formatted context here",
                 "context_items": [],
                 "context_count": 3,
+                "conversation_id": "123e4567-e89b-12d3-a456-426614174000",
                 "timestamp": "2026-02-05T10:30:00"
             }
         }
@@ -162,3 +164,92 @@ class HealthResponse(BaseModel):
     database_connected: bool = Field(..., description="Database connection status")
     llm_configured: bool = Field(..., description="LLM configuration status")
     timestamp: datetime = Field(default_factory=datetime.now)
+
+
+# Authentication Models
+class UserRegister(BaseModel):
+    """User registration request."""
+    email: str = Field(..., min_length=3, max_length=255, description="Email address")
+    username: str = Field(..., min_length=3, max_length=100, description="Username")
+    password: str = Field(..., min_length=6, max_length=100, description="Password")
+    full_name: Optional[str] = Field(None, max_length=255, description="Full name")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "email": "user@example.com",
+                "username": "john_doe",
+                "password": "SecurePass123!",
+                "full_name": "John Doe"
+            }
+        }
+
+
+class UserLogin(BaseModel):
+    """User login request."""
+    email: str = Field(..., description="Email address")
+    password: str = Field(..., description="Password")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "email": "user@example.com",
+                "password": "SecurePass123!"
+            }
+        }
+
+
+class UserResponse(BaseModel):
+    """User data response (without sensitive fields)."""
+    id: str
+    email: str
+    username: str
+    full_name: Optional[str] = None
+    created_at: datetime
+    last_login: Optional[datetime] = None
+    is_active: bool
+    is_verified: bool
+
+
+class TokenResponse(BaseModel):
+    """Authentication token response."""
+    access_token: str = Field(..., description="JWT access token")
+    refresh_token: str = Field(..., description="JWT refresh token")
+    token_type: str = Field(default="bearer", description="Token type")
+    expires_in: int = Field(..., description="Access token expiration time in seconds")
+    user: UserResponse = Field(..., description="User data")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+                "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+                "token_type": "bearer",
+                "expires_in": 1800,
+                "user": {
+                    "id": "123e4567-e89b-12d3-a456-426614174000",
+                    "email": "user@example.com",
+                    "username": "john_doe",
+                    "full_name": "John Doe",
+                    "created_at": "2026-02-05T10:30:00",
+                    "last_login": "2026-02-05T10:30:00",
+                    "is_active": True,
+                    "is_verified": False
+                }
+            }
+        }
+
+
+class RefreshTokenRequest(BaseModel):
+    """Refresh token request."""
+    refresh_token: str = Field(..., description="JWT refresh token")
+
+
+class ConversationResponse(BaseModel):
+    """Conversation data response."""
+    id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    is_archived: bool
+    message_count: Optional[int] = None

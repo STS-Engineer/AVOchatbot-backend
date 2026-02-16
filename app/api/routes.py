@@ -2,7 +2,7 @@
 Main API routes for the chatbot backend.
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import FileResponse
 from loguru import logger
 from pathlib import Path
@@ -13,6 +13,7 @@ from app.models.schemas import (
 )
 from app.services.chat import get_chat_service
 from app.services.rag import get_rag_service
+from app.middleware.auth import get_current_user
 from datetime import datetime
 
 router = APIRouter(prefix="/api", tags=["chat"])
@@ -30,14 +31,20 @@ def init_services():
 
 
 @router.post("/chat", response_model=ChatResponse, summary="Send a chat message")
-async def chat(request: ChatRequest) -> ChatResponse:
+async def chat(
+    request: ChatRequest,
+    current_user: dict = Depends(get_current_user)
+) -> ChatResponse:
     """
     Send a message to the chatbot and receive an AI-generated response with knowledge base context.
+    
+    **Authentication Required:** Bearer token in Authorization header
     
     **Request Body:**
     - `message`: The user's question or query (required, 1-5000 characters)
     - `include_context`: Whether to include retrieved context in response (default: true)
     - `top_k`: Number of context items to retrieve (default: 8, min: 1, max: 20)
+    - `conversation_id`: Optional conversation ID (creates new conversation if not provided)
     
     **Response:**
     - `success`: Whether the request was successful
@@ -45,16 +52,19 @@ async def chat(request: ChatRequest) -> ChatResponse:
     - `context`: Formatted knowledge base context
     - `context_items`: Detailed context items retrieved
     - `context_count`: Number of context items
+    - `conversation_id`: Current conversation ID
     - `timestamp`: Response timestamp
     """
     try:
         if not chat_service:
             init_services()
         
-        logger.info(f"Chat request: {request.message[:100]}")
+        user_id = str(current_user["id"])
+        logger.info(f"Chat request from user {user_id}: {request.message[:100]}")
         
         result = chat_service.process_message(
             message=request.message,
+            user_id=user_id,
             top_k=request.top_k,
             include_context=request.include_context,
             conversation_id=request.conversation_id,
@@ -73,24 +83,35 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
 
 @router.post("/edit-message", response_model=ChatResponse, summary="Edit a message and regenerate response")
-async def edit_message(request: EditMessageRequest) -> ChatResponse:
+async def edit_message(
+    request: EditMessageRequest,
+    current_user: dict = Depends(get_current_user)
+) -> ChatResponse:
     """
     Edit a prior user message and regenerate the assistant response.
+
+    **Authentication Required:** Bearer token in Authorization header
 
     **Request Body:**
     - `message`: Updated user message
     - `message_index`: Zero-based index of the user message in history
     - `include_context`: Whether to include retrieved context in response
     - `top_k`: Number of context items to retrieve
-    - `conversation_id`: Conversation identifier
+    - `conversation_id`: Conversation identifier (required)
     """
     try:
         if not chat_service:
             init_services()
 
+        user_id = str(current_user["id"])
+        
+        if not request.conversation_id:
+            raise HTTPException(status_code=400, detail="conversation_id is required for editing messages")
+
         result = chat_service.edit_message_and_respond(
             message_index=request.message_index,
             new_message=request.message,
+            user_id=user_id,
             top_k=request.top_k,
             include_context=request.include_context,
             conversation_id=request.conversation_id,
@@ -110,14 +131,18 @@ async def edit_message(request: EditMessageRequest) -> ChatResponse:
 
 @router.get("/history", response_model=HistoryResponse, summary="Get conversation history")
 async def get_history(
+    conversation_id: str = Query(..., description="Conversation identifier"),
     limit: int = Query(50, ge=1, le=200, description="Number of messages to retrieve"),
     offset: int = Query(0, ge=0, description="Offset for pagination"),
-    conversation_id: Optional[str] = Query(None, description="Conversation identifier")
+    current_user: dict = Depends(get_current_user)
 ) -> HistoryResponse:
     """
     Retrieve the conversation history with pagination support.
     
+    **Authentication Required:** Bearer token in Authorization header
+    
     **Query Parameters:**
+    - `conversation_id`: Conversation ID (required)
     - `limit`: Maximum number of messages (default: 50, min: 1, max: 200)
     - `offset`: Number of messages to skip (default: 0)
     
@@ -131,7 +156,14 @@ async def get_history(
         if not chat_service:
             init_services()
         
-        messages = chat_service.get_history(limit=limit, offset=offset, conversation_id=conversation_id)
+        user_id = str(current_user["id"])
+        
+        messages = chat_service.get_history(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            limit=limit,
+            offset=offset
+        )
         
         # Convert to HistoryMessage objects
         history_messages = [
@@ -147,34 +179,48 @@ async def get_history(
         return HistoryResponse(
             success=True,
             messages=history_messages,
-            total=chat_service.get_history_count(conversation_id=conversation_id),
+            total=len(history_messages),
             timestamp=datetime.now()
         )
     
     except Exception as e:
-        logger.error(f"Error in history endpoint: {e}")
+        logger.error(f"Error retrieving history: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/clear-history", summary="Clear conversation history")
-async def clear_history(
-    conversation_id: Optional[str] = Query(None, description="Conversation identifier")
+@router.delete("/conversation/{conversation_id}", summary="Delete conversation")
+async def delete_conversation(
+    conversation_id: str,
+    current_user: dict = Depends(get_current_user)
 ):
-    """Clear conversation history."""
+    """
+    Delete a conversation and all its messages.
+    
+    **Authentication Required:** Bearer token in Authorization header
+    
+    **Path Parameters:**
+    - `conversation_id`: Conversation ID to delete
+    """
     try:
         if not chat_service:
             init_services()
         
-        success = chat_service.clear_history(conversation_id=conversation_id)
+        user_id = str(current_user["id"])
+        success = chat_service.clear_history(user_id=user_id, conversation_id=conversation_id)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Conversation not found or access denied")
         
         return {
             "success": success,
-            "message": "Conversation history cleared" if success else "Failed to clear history",
+            "message": "Conversation deleted successfully",
             "timestamp": datetime.now().isoformat()
         }
     
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error clearing history: {e}")
+        logger.error(f"Error deleting conversation: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

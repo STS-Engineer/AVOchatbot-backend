@@ -14,6 +14,7 @@ from app.core.config import settings
 from app.core.logging import setup_logging
 from app.api.routes import router as chat_router, init_services
 from app.api.health import router as health_router
+from app.api.auth_routes import router as auth_router
 
 # Setup logging
 logger.remove()
@@ -64,6 +65,7 @@ app.add_middleware(
 )
 
 # Include routers
+app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(health_router)
 
