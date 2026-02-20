@@ -72,7 +72,6 @@ User message: {request.message}
         """
         manager_email = "rihem.arfaoui@avocarbon.com"
         subject = f"[Assistant Escalation] {escalation_reason}"
-        import mailer
         mailer.send_email(to_email=manager_email, subject=subject, html_body=recap_message)
         return AssistantHelpResponse(success=True, answer=answer, escalated=True, escalation_message="Your request was escalated to the manager.")
     else:
@@ -97,7 +96,7 @@ from app.core.config import settings
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../')))
-import mailer
+from app.utils import mailer
 
 @router.post("/complaint", response_model=ComplaintResponse, summary="Submit a complaint or assistance request")
 async def submit_complaint(
@@ -425,4 +424,3 @@ async def download_file(file_path: str):
     except Exception as e:
         logger.error(f"Error downloading file: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
