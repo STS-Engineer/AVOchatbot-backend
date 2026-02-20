@@ -70,6 +70,13 @@ class Settings(BaseSettings):
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FILE: str = "logs/backend.log"
+
+    # SMTP (for assistant/complaint email feature)
+    SMTP_HOST: str = "smtp.avocarbon.com"  # Default, can be overridden in .env
+    SMTP_PORT: int = 25
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM: str = ""
     
     class Config:
         env_file = ".env"

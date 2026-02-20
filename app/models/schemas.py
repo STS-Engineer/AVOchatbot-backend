@@ -1,3 +1,4 @@
+
 """
 Pydantic models for API requests and responses.
 """
@@ -5,6 +6,17 @@ Pydantic models for API requests and responses.
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from datetime import datetime
+
+class AssistantHelpRequest(BaseModel):
+    """Request model for assistant help Q/A."""
+    message: str = Field(..., min_length=1, max_length=2000, description="User's help/complaint message")
+
+class AssistantHelpResponse(BaseModel):
+    """Response model for assistant help Q/A."""
+    success: bool
+    answer: str
+    escalated: bool = False
+    escalation_message: str = ""
 
 
 # Request Models
@@ -183,6 +195,18 @@ class UserRegister(BaseModel):
                 "full_name": "John Doe"
             }
         }
+
+
+# Complaint/Assistance Models
+class ComplaintRequest(BaseModel):
+    """User complaint or assistance request."""
+    subject: str = Field(..., min_length=3, max_length=200, description="Complaint subject or topic")
+    message: str = Field(..., min_length=5, max_length=2000, description="Complaint or assistance message")
+
+class ComplaintResponse(BaseModel):
+    success: bool
+    message: str
+    escalated: bool = False
 
 
 class UserLogin(BaseModel):

@@ -1,3 +1,4 @@
+
 """
 Main API routes for the chatbot backend.
 """
@@ -9,7 +10,8 @@ from pathlib import Path
 from typing import Optional
 from app.models.schemas import (
     ChatRequest, ChatResponse, HistoryRequest, HistoryResponse,
-    SearchRequest, SearchResponse, HistoryMessage, EditMessageRequest
+    SearchRequest, SearchResponse, HistoryMessage, EditMessageRequest,
+    AssistantHelpRequest, AssistantHelpResponse
 )
 from app.services.chat import get_chat_service
 from app.services.rag import get_rag_service
@@ -17,6 +19,64 @@ from app.middleware.auth import get_current_user
 from datetime import datetime
 
 router = APIRouter(prefix="/api", tags=["chat"])
+
+# --- Assistant Help Q/A endpoint with escalation ---
+@router.post("/assistant-help", response_model=AssistantHelpResponse, summary="Assistant help Q/A with escalation")
+async def assistant_help(
+    request: AssistantHelpRequest,
+    current_user: dict = Depends(get_current_user)
+) -> AssistantHelpResponse:
+    """
+    Assistant answers user help/complaint. If escalation is needed, an email is sent to the manager.
+    """
+    # Use LLM to answer the question and decide escalation
+    from app.services.llm import get_llm_service
+    llm = get_llm_service()
+    escalation_prompt = f"""
+You are a helpful assistant. Answer the user's message below. If the issue requires manager/admin intervention (e.g., cannot be solved by assistant, is a serious complaint, or needs human action), respond with:
+
+ESCALATE: <reason for escalation>
+<Your answer to the user>
+
+Otherwise, just answer the user directly.
+
+User message: {request.message}
+"""
+    llm_response = llm.generate_response(escalation_prompt)
+    # Check if user explicitly requests manager/admin help
+    user_message_lower = request.message.lower()
+    force_escalate_keywords = [
+        "tell the manager", "contact the manager", "admin's help", "need admin", "need manager", "escalate", "manager help", "admin help"
+    ]
+    force_escalate = any(keyword in user_message_lower for keyword in force_escalate_keywords)
+
+    if llm_response.strip().upper().startswith("ESCALATE:") or force_escalate:
+        # Extract escalation reason and answer
+        if llm_response.strip().upper().startswith("ESCALATE:"):
+            lines = llm_response.split("\n", 2)
+            escalation_reason = lines[0][9:].strip() if len(lines) > 0 else "Escalation required"
+            answer = lines[1].strip() if len(lines) > 1 else ""
+        else:
+            escalation_reason = "User explicitly requested manager/admin intervention."
+            answer = "Your request has been escalated to the manager as you requested."
+        # Compose a professional recap message for the manager
+        recap_message = f"""
+        <html><body>
+        <h3>Escalation Recap</h3>
+        <p><b>User:</b> {current_user.get('email','user')}</p>
+        <p><b>Date:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        <p><b>Situation:</b> The user requested assistance and the issue requires manager/admin intervention.</p>
+        <p><b>User Message:</b> {request.message}</p>
+        <p><b>Reason for Escalation:</b> {escalation_reason}</p>
+        </body></html>
+        """
+        manager_email = "rihem.arfaoui@avocarbon.com"
+        subject = f"[Assistant Escalation] {escalation_reason}"
+        import mailer
+        mailer.send_email(to_email=manager_email, subject=subject, html_body=recap_message)
+        return AssistantHelpResponse(success=True, answer=answer, escalated=True, escalation_message="Your request was escalated to the manager.")
+    else:
+        return AssistantHelpResponse(success=True, answer=llm_response, escalated=False, escalation_message="")
 
 # Get service instances
 chat_service = None
@@ -28,6 +88,45 @@ def init_services():
     global chat_service, rag_service
     chat_service = get_chat_service()
     rag_service = get_rag_service()
+
+
+
+# Complaint/Assistance endpoint
+from app.models.schemas import ComplaintRequest, ComplaintResponse
+from app.core.config import settings
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../')))
+import mailer
+
+@router.post("/complaint", response_model=ComplaintResponse, summary="Submit a complaint or assistance request")
+async def submit_complaint(
+    request: ComplaintRequest,
+    current_user: dict = Depends(get_current_user)
+) -> ComplaintResponse:
+    """
+    Submit a complaint or assistance request. If escalation is needed, an email is sent to the manager.
+    """
+    # Compose email to admin/manager
+    manager_email = "rihem.arfaoui@avocarbon.com"  # Updated to real admin/manager email
+    subject = f"[Chatbot Assistance/Complaint] {request.subject}"
+    html_body = f"""
+    <html><body>
+    <h3>New Complaint/Assistance Request from {current_user.get('email','user')}</h3>
+    <p><b>Subject:</b> {request.subject}</p>
+    <p><b>Message:</b><br>{request.message}</p>
+    </body></html>
+    """
+    # Send email using mailer.py
+    email_sent = mailer.send_email(
+        to_email=manager_email,
+        subject=subject,
+        html_body=html_body
+    )
+    if email_sent:
+        return ComplaintResponse(success=True, message="Your complaint/request was received. The manager has been notified.", escalated=True)
+    else:
+        return ComplaintResponse(success=False, message="Failed to notify manager by email, but your complaint was received.", escalated=False)
 
 
 @router.post("/chat", response_model=ChatResponse, summary="Send a chat message")
