@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     # Groq LLM (required from environment)
     GROQ_API_KEY: str
     LLM_TEMPERATURE: float = 0.7
-    LLM_MAX_TOKENS: int = 1024
+    LLM_MAX_TOKENS: int = 2048
     LLM_MODEL: str = "openai/gpt-oss-120b"
     
     # OpenAI (Embeddings) (required from environment)
