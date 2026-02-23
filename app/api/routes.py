@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from loguru import logger
 from pathlib import Path
 from typing import Optional
+from html import escape
 from app.models.schemas import (
     ChatRequest, ChatResponse, HistoryRequest, HistoryResponse,
     SearchRequest, SearchResponse, HistoryMessage, EditMessageRequest,
@@ -19,6 +20,25 @@ from app.middleware.auth import get_current_user
 from datetime import datetime
 
 router = APIRouter(prefix="/api", tags=["chat"])
+
+
+def _truncate_for_subject(text: str, max_length: int = 70) -> str:
+    """Keep subject lines concise and readable."""
+    cleaned = " ".join((text or "").split())
+    if not cleaned:
+        return "Escalation Required"
+    return cleaned if len(cleaned) <= max_length else f"{cleaned[:max_length - 1].rstrip()}…"
+
+
+def _format_professional_issue(text: str) -> str:
+    """Format user issue text into a professional single sentence."""
+    cleaned = " ".join((text or "").split()).strip()
+    if not cleaned:
+        return "No additional details were provided by the user."
+    cleaned = cleaned[0].upper() + cleaned[1:] if len(cleaned) > 1 else cleaned.upper()
+    if cleaned[-1] not in ".!?":
+        cleaned += "."
+    return cleaned
 
 # --- Assistant Help Q/A endpoint with escalation ---
 @router.post("/assistant-help", response_model=AssistantHelpResponse, summary="Assistant help Q/A with escalation")
@@ -33,15 +53,15 @@ async def assistant_help(
     from app.services.llm import get_llm_service
     llm = get_llm_service()
     escalation_prompt = f"""
-You are a helpful assistant. Answer the user's message below. If the issue requires manager/admin intervention (e.g., cannot be solved by assistant, is a serious complaint, or needs human action), respond with:
+    You are a helpful assistant. Answer the user's message below. If the issue requires manager/admin intervention (e.g., cannot be solved by assistant, is a serious complaint, or needs human action), respond with:
 
-ESCALATE: <reason for escalation>
-<Your answer to the user>
+    ESCALATE: <reason for escalation>
+    <Your answer to the user>
 
-Otherwise, just answer the user directly.
+    Otherwise, just answer the user directly.
 
-User message: {request.message}
-"""
+    User message: {request.message}
+    """
     llm_response = llm.generate_response(escalation_prompt)
     # Check if user explicitly requests manager/admin help
     user_message_lower = request.message.lower()
@@ -59,19 +79,26 @@ User message: {request.message}
         else:
             escalation_reason = "User explicitly requested manager/admin intervention."
             answer = "Your request has been escalated to the manager as you requested."
-        # Compose a professional recap message for the manager
+        short_reason = _truncate_for_subject(escalation_reason)
+        professional_issue = _format_professional_issue(request.message)
+        escaped_user = escape(current_user.get("email", "user"))
+        escaped_reason = escape(escalation_reason)
+        escaped_issue = escape(professional_issue)
+
+        # Compose a concise, executive-style escalation email
         recap_message = f"""
         <html><body>
-        <h3>Escalation Recap</h3>
-        <p><b>User:</b> {current_user.get('email','user')}</p>
-        <p><b>Date:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-        <p><b>Situation:</b> The user requested assistance and the issue requires manager/admin intervention.</p>
-        <p><b>User Message:</b> {request.message}</p>
-        <p><b>Reason for Escalation:</b> {escalation_reason}</p>
+        <h3>Knowledge-Base Chatbot Incident Notification</h3>
+        <p><b>Reported By:</b> {escaped_user}</p>
+        <p><b>Reported At:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        <p><b>Severity:</b> Escalated for managerial review</p>
+        <p><b>Issue Summary:</b> {escaped_issue}</p>
+        <p><b>Escalation Rationale:</b> {escaped_reason}</p>
+        <p><b>Requested Action:</b> Please review the chatbot knowledge base and response quality for corrective action.</p>
         </body></html>
         """
         manager_email = "rihem.arfaoui@avocarbon.com"
-        subject = f"[Assistant Escalation] {escalation_reason}"
+        subject = f"[KB Chatbot Alert] {short_reason}"
         mailer.send_email(to_email=manager_email, subject=subject, html_body=recap_message)
         return AssistantHelpResponse(success=True, answer=answer, escalated=True, escalation_message="Your request was escalated to the manager.")
     else:
