@@ -388,7 +388,7 @@ Respond with ONLY "YES" if at least one topic is relevant, or "NO" if none are r
                 ext = '.' + file_path.lower().split('.')[-1]
                 return mime_types.get(ext, 'unknown')
             
-            # Fetch attachments for this node and child nodes
+            # Fetch  ments for this node and child nodes
             node_id = result.get('id')
             all_attachments = []
             

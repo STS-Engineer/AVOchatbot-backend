@@ -183,7 +183,7 @@ class UserRegister(BaseModel):
     """User registration request."""
     email: str = Field(..., min_length=3, max_length=255, description="Email address")
     username: str = Field(..., min_length=3, max_length=100, description="Username")
-    password: str = Field(..., min_length=6, max_length=100, description="Password")
+    password: str = Field(..., min_length=6, max_length=255, description="Password")
     full_name: Optional[str] = Field(None, max_length=255, description="Full name")
     
     class Config:
@@ -225,14 +225,14 @@ class UserLogin(BaseModel):
 
 class UserResponse(BaseModel):
     """User data response (without sensitive fields)."""
-    id: str
+    id: str  # uuid as string
     email: str
     username: str
     full_name: Optional[str] = None
     created_at: datetime
     last_login: Optional[datetime] = None
-    is_active: bool
-    is_verified: bool
+    is_active: bool = True
+    is_verified: bool = False
 
 
 class TokenResponse(BaseModel):

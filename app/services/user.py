@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 from sqlalchemy import text
 from loguru import logger
-from app.services.database import get_database
+from app.services.database import get_users_database
 from app.services.auth import get_auth_service
 
 
@@ -14,10 +14,11 @@ class UserService:
     """Handles user-related database operations."""
     
     def __init__(self):
-        """Initialize user service."""
-        self.db = get_database()
+        """Initialize user service (uses central users database)."""
+        from app.services.database import get_users_database
+        self.db = get_users_database()
         self.auth = get_auth_service()
-        logger.info("User service initialized")
+        logger.info("User service initialized (central users DB)")
     
     def create_user(
         self,
@@ -67,7 +68,7 @@ class UserService:
                     text("""
                     INSERT INTO users (email, username, password_hash, full_name, created_at, is_active, is_verified)
                     VALUES (:email, :username, :password_hash, :full_name, :created_at, TRUE, FALSE)
-                    RETURNING id, email, username, full_name, created_at, is_active, is_verified
+                    RETURNING id, email, username, password_hash, full_name, created_at, is_active, is_verified
                     """),
                     {
                         "email": email,
@@ -82,8 +83,34 @@ class UserService:
                 user = result.fetchone()
                 if user:
                     logger.info(f"User created successfully: {username}")
-                    return dict(user._mapping)
-                
+                    user_dict = dict(user._mapping)
+                    # Duplicate user to knowledge_DB
+                    try:
+                        from app.services.database import get_database
+                        knowledge_db = get_database()
+                        with knowledge_db.get_session() as ksession:
+                            ksession.execute(
+                                text("""
+                                    INSERT INTO users (id, email, username, password_hash, full_name, created_at, is_active, is_verified)
+                                    VALUES (:id, :email, :username, :password_hash, :full_name, :created_at, :is_active, :is_verified)
+                                    ON CONFLICT (id) DO NOTHING
+                                """),
+                                {
+                                    "id": user_dict["id"],
+                                    "email": user_dict["email"],
+                                    "username": user_dict["username"],
+                                    "password_hash": user_dict["password_hash"],
+                                    "full_name": user_dict.get("full_name"),
+                                    "created_at": user_dict["created_at"],
+                                    "is_active": user_dict["is_active"],
+                                    "is_verified": user_dict["is_verified"]
+                                }
+                            )
+                            ksession.commit()
+                        logger.info(f"User duplicated to knowledge_DB: {username}")
+                    except Exception as dup_e:
+                        logger.error(f"Failed to duplicate user to knowledge_DB: {dup_e}")
+                    return user_dict
                 return None
         
         except Exception as e:
@@ -272,7 +299,7 @@ _user_service = None
 
 
 def get_user_service() -> UserService:
-    """Get or create user service instance."""
+    """Get or create user service instance (central users DB)."""
     global _user_service
     if _user_service is None:
         _user_service = UserService()

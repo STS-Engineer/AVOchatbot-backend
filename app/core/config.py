@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     DB_USER: str
     DB_PASSWORD: str
     DB_SSLMODE: str
+
+    # Central users database (required from environment)
+    USERS_DB_HOST: str
+    USERS_DB_PORT: int
+    USERS_DB_NAME: str
+    USERS_DB_USER: str
+    USERS_DB_PASSWORD: str
+    USERS_DB_SSLMODE: str
     
     # Groq LLM (required from environment)
     GROQ_API_KEY: str
@@ -83,12 +91,20 @@ class Settings(BaseSettings):
         env_file_encoding = "utf-8"
         case_sensitive = True
     
+
     @property
     def database_url(self) -> str:
-        """Build database connection URL."""
+        """Build knowledge base database connection URL."""
         from urllib.parse import quote
         password = quote(self.DB_PASSWORD, safe='')
         return f"postgresql://{self.DB_USER}:{password}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+
+    @property
+    def users_database_url(self) -> str:
+        """Build central users database connection URL."""
+        from urllib.parse import quote
+        password = quote(self.USERS_DB_PASSWORD, safe='')
+        return f"postgresql://{self.USERS_DB_USER}:{password}@{self.USERS_DB_HOST}:{self.USERS_DB_PORT}/{self.USERS_DB_NAME}"
 
 
 # Create settings instance

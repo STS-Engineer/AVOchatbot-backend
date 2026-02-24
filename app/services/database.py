@@ -12,23 +12,26 @@ from app.core.config import settings
 
 class DatabaseService:
     """Handles database connections and queries."""
-    
-    def __init__(self):
-        """Initialize database connection."""
+    def __init__(self, database_url: str = None, sslmode: str = None, db_host: str = None, db_port: int = None, db_name: str = None):
+        """Initialize database connection. Defaults to main knowledge base DB."""
         self.engine = None
         self.SessionLocal = None
+        self._database_url = database_url or settings.database_url
+        self._sslmode = sslmode or settings.DB_SSLMODE
+        self._db_host = db_host or settings.DB_HOST
+        self._db_port = db_port or settings.DB_PORT
+        self._db_name = db_name or settings.DB_NAME
         self._init_connection()
-    
+
     def _init_connection(self):
         """Initialize the database engine."""
         try:
             connect_args = {
-                "sslmode": settings.DB_SSLMODE,
+                "sslmode": self._sslmode,
                 "connect_timeout": 10
             }
-            
             self.engine = create_engine(
-                settings.database_url,
+                self._database_url,
                 connect_args=connect_args,
                 echo=False,
                 pool_pre_ping=True,
@@ -36,7 +39,7 @@ class DatabaseService:
                 max_overflow=10
             )
             self.SessionLocal = sessionmaker(bind=self.engine)
-            logger.info(f"Database connection initialized: {settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}")
+            logger.info(f"Database connection initialized: {self._db_host}:{self._db_port}/{self._db_name}")
         except Exception as e:
             logger.error(f"Failed to initialize database connection: {e}")
             raise
@@ -263,6 +266,9 @@ class DatabaseService:
 # Global database instance
 _db_instance: Optional[DatabaseService] = None
 
+# Global central users database instance
+_users_db_instance: Optional[DatabaseService] = None
+
 
 def get_database() -> DatabaseService:
     """Get or create the global database service instance."""
@@ -270,3 +276,16 @@ def get_database() -> DatabaseService:
     if _db_instance is None:
         _db_instance = DatabaseService()
     return _db_instance
+
+def get_users_database() -> DatabaseService:
+    """Get or create the global central users database service instance (chatbots_users DB)."""
+    global _users_db_instance
+    if _users_db_instance is None:
+        _users_db_instance = DatabaseService(
+            database_url=settings.users_database_url,
+            sslmode=settings.USERS_DB_SSLMODE,
+            db_host=settings.USERS_DB_HOST,
+            db_port=settings.USERS_DB_PORT,
+            db_name=settings.USERS_DB_NAME
+        )
+    return _users_db_instance
