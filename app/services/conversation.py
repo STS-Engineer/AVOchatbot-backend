@@ -20,15 +20,16 @@ class ConversationService:
     def create_conversation(self, user_id: str, title: Optional[str] = None) -> Optional[str]:
         """
         Create a new conversation for a user.
-        
-        Args:
-            user_id: User's ID
-            title: Optional conversation title (generated from first message if None)
-        
-        Returns:
-            conversation_id if created successfully, None otherwise
+        Ensures user exists in knowledge_DB.users before creating conversation.
         """
         try:
+            # Pre-conversation check: ensure user exists in users table
+            from app.services.user import get_user_service
+            user_service = get_user_service()
+            user = user_service.get_user_by_id(user_id)
+            if not user:
+                logger.error(f"Cannot create conversation: user_id {user_id} not found in knowledge_DB.users.")
+                return None
             with self.db.get_session() as session:
                 result = session.execute(
                     text("""
@@ -44,15 +45,15 @@ class ConversationService:
                     }
                 )
                 session.commit()
-                
                 conversation = result.fetchone()
                 if conversation:
                     conversation_id = str(conversation[0])
                     logger.info(f"Conversation created: {conversation_id} for user {user_id}")
                     return conversation_id
-                
                 return None
-        
+        except Exception as e:
+            logger.error(f"Error creating conversation: {e}")
+            return None
         except Exception as e:
             logger.error(f"Error creating conversation: {e}")
             return None
