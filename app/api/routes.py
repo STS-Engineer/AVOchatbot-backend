@@ -3,7 +3,7 @@
 Main API routes for the chatbot backend.
 """
 
-from fastapi import APIRouter, HTTPException, Query, Depends
+from fastapi import APIRouter, HTTPException, Query, Depends, File, UploadFile
 from fastapi.responses import FileResponse
 from loguru import logger
 from pathlib import Path
@@ -20,6 +20,22 @@ from app.middleware.auth import get_current_user
 from datetime import datetime
 
 router = APIRouter(prefix="/api", tags=["chat"])
+
+# --- Image/File Upload Endpoint ---
+@router.post("/upload", summary="Upload an image or file")
+async def upload_file(file: UploadFile = File(...)):
+    """
+    Upload an image or file. Saves to uploads/ directory and returns the file path.
+    """
+    from pathlib import Path
+    import shutil
+    uploads_dir = Path(__file__).parent.parent.parent / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    file_path = uploads_dir / file.filename
+    # Save file
+    with file_path.open("wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    return {"success": True, "file_path": file.filename, "url": f"/uploads/{file.filename}"}
 
 
 def _truncate_for_subject(text: str, max_length: int = 70) -> str:
