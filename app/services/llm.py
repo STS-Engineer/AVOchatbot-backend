@@ -71,7 +71,8 @@ class LLMService:
             temp = temperature if temperature is not None else self.temperature
             
             # Flexible system message - less prescriptive
-            system_message = """You are an intelligent assistant for an organization's knowledge base chatbot.
+            system_message = """
+You are an intelligent assistant for an organization's knowledge base chatbot.
 
 Your behavior adapts based on available context:
 
@@ -99,7 +100,15 @@ Your behavior adapts based on available context:
 - Don't use phrases like "as shown in the image"
 - Images are displayed separately
 
-You can answer any question - prioritize KB when available, use conversation and knowledge otherwise."""
+**Formatting instructions:**
+- Use Markdown or HTML for your answers to make them visually clear and engaging.
+- Use tables, lists, headings, and bold text for structure.
+- Add color (using HTML style or Markdown where supported) for emphasis.
+- Prefer concise, readable formatting.
+- If the answer involves a process or steps, use numbered lists or tables.
+
+You can answer any question - prioritize KB when available, use conversation and knowledge otherwise.
+"""
 
             # Build conversation context
             history_block = self._format_conversation_history(conversation_history)

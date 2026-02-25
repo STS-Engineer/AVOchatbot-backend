@@ -3,7 +3,7 @@
 Main API routes for the chatbot backend.
 """
 
-from fastapi import APIRouter, HTTPException, Query, Depends, File, UploadFile
+from fastapi import APIRouter, HTTPException, Query, Depends, File, UploadFile, BackgroundTasks
 from fastapi.responses import FileResponse
 from loguru import logger
 from pathlib import Path
@@ -57,100 +57,81 @@ def _format_professional_issue(text: str) -> str:
     return cleaned
 
 # --- Assistant Help Q/A endpoint with escalation ---
-@router.post("/assistant-help", response_model=AssistantHelpResponse, summary="Assistant help Q/A with escalation")
+@router.post("/assistant-help", summary="Assistant help Q/A with escalation", response_model=AssistantHelpResponse)
 async def assistant_help(
     request: AssistantHelpRequest,
+    background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user)
 ) -> AssistantHelpResponse:
     """
     Assistant answers user help/complaint. If escalation is needed, an email is sent to the manager.
     """
+    logger.info(f"[assistant_help] Endpoint called. Payload: {{'message': request.message, 'user': {current_user.get('email', 'unknown')}}}")
     # Use LLM to answer the question and decide escalation
     from app.services.llm import get_llm_service
     llm = get_llm_service()
     user_message_lower = request.message.lower()
-    # Keywords for technical issues that require immediate escalation
-    technical_escalate_keywords = [
-        "can't login", "cannot login", "login failed", "access denied", "permission denied", "not authorized", "account locked", "reset my password", "need access", "cannot access", "credentials", "authorization", "authentication", "2fa not working", "two factor not working", "password expired", "account disabled"
-    ]
-    force_escalate_keywords = [
-        "tell the manager", "contact the manager", "admin's help", "need admin", "need manager", "escalate", "manager help", "admin help"
-    ]
-    force_escalate = any(keyword in user_message_lower for keyword in force_escalate_keywords)
-    technical_escalate = any(keyword in user_message_lower for keyword in technical_escalate_keywords)
-
-    # If technical issue or explicit escalation, escalate immediately
-    if technical_escalate or force_escalate:
-        escalation_reason = "Technical issue requiring intervention" if technical_escalate else "User explicitly requested manager/admin intervention."
-        answer = (
-            "Your request has been escalated to the technical team for immediate review. "
-            "A team member will contact you soon."
-            if technical_escalate else
-            "Your request has been escalated to the manager as you requested."
-        )
-        short_reason = _truncate_for_subject(escalation_reason)
-        professional_issue = _format_professional_issue(request.message)
-        escaped_user = escape(current_user.get("email", "user"))
-        escaped_reason = escape(escalation_reason)
-        escaped_issue = escape(professional_issue)
-
-        # Improved, descriptive escalation email
-        recap_message = f"""
-        <html><body>
-        <h3>Knowledge-Base Chatbot Incident Notification</h3>
-        <p><b>Reported By:</b> {escaped_user}</p>
-        <p><b>Reported At:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-        <p><b>Severity:</b> Escalated to Technical Team</p>
-        <p><b>Issue Summary:</b> {escaped_issue}</p>
-        <p><b>Escalation Rationale:</b> {escaped_reason}</p>
-        <p><b>User's Original Message:</b> {escape(request.message)}</p>
-        <p><b>Requested Action:</b> Please investigate and assist the user. If the issue is related to access, credentials, or permissions, please resolve promptly and update the user.</p>
-        </body></html>
-        """
-        manager_email = "rihem.arfaoui@avocarbon.com"
-        subject = f"[KB Chatbot Alert] {short_reason}"
-        mailer.send_email(to_email=manager_email, subject=subject, html_body=recap_message)
-        return AssistantHelpResponse(success=True, answer=answer, escalated=True, escalation_message="Your request was escalated to the technical team.")
-
-    # Otherwise, use LLM to answer and escalate only if LLM says so
+    # Escalate immediately for any technical problem, no more asking the user
     escalation_prompt = f"""
-    You are a helpful assistant. Answer the user's message below. If the issue requires manager/admin intervention (e.g., cannot be solved by assistant, is a serious complaint, or needs human action), respond with:
+You are a professional support assistant. If the user's message describes a technical problem (e.g. chatbot not working, errors, bugs, service down, etc),If the user does not mention what exactly is broke , ask him once then confirm to him  and escalate immediately to the technical team without asking the user . 
+Your answer must be very short, visually clear, and always use Markdown or HTML for formatting. Do not explain too much , do not ask for confirmation if the user said to report the problem, do not repeat yourself. Just confirm escalation in a single short sentence. If it's not a technical problem, answer concisely and beautifully.
 
-    ESCALATE: <reason for escalation>
-    <Your answer to the user>
-
-    Otherwise, just answer the user directly.
-
-    User message: {request.message}
-    """
+User message: {request.message}
+"""
     llm_response = llm.generate_response(escalation_prompt)
-    if llm_response.strip().upper().startswith("ESCALATE:"):
-        lines = llm_response.split("\n", 2)
-        escalation_reason = lines[0][9:].strip() if len(lines) > 0 else "Escalation required"
-        answer = lines[1].strip() if len(lines) > 1 else ""
-        short_reason = _truncate_for_subject(escalation_reason)
-        professional_issue = _format_professional_issue(request.message)
+    logger.info(f"[assistant_help] LLM response: {llm_response}")
+    escalate = False
+    llm_response_lower = llm_response.lower()
+    if (
+        "escalate_now" in llm_response_lower
+        or "has been escalated" in llm_response_lower
+        or "notified" in llm_response_lower
+        or "escalated to the technical team" in llm_response_lower
+        or "escalated" in llm_response_lower
+        or "escalating" in llm_response_lower
+        or "issue reported" in llm_response_lower
+    ):
+        escalate = True
+    logger.info(f"[assistant_help] Escalation decision: escalate={escalate} for user: {current_user.get('email', 'unknown')}")
+    if escalate:
+        logger.info(f"[assistant_help] Entered escalation block for user: {current_user.get('email', 'unknown')}")
         escaped_user = escape(current_user.get("email", "user"))
-        escaped_reason = escape(escalation_reason)
-        escaped_issue = escape(professional_issue)
-
+        # Fetch recent conversation history (stub: empty for now)
+        conversation_history = []
+        # Example: conversation_history = chat_service.get_history(user_id=current_user["id"], limit=5)
+        llm_analysis_prompt = f"""
+    Summarize the user's technical issue for the escalation report. Make the summary visually clear, concise, and not overly specific. Use Markdown or HTML for formatting. Example: highlight the main problem, user observation . Avoid detailed troubleshooting steps.
+    User message:
+    {request.message}
+    """
+        llm_analysis = llm.generate_response(llm_analysis_prompt)
         recap_message = f"""
         <html><body>
-        <h3>Knowledge-Base Chatbot Incident Notification</h3>
-        <p><b>Reported By:</b> {escaped_user}</p>
-        <p><b>Reported At:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-        <p><b>Severity:</b> Escalated for managerial review</p>
-        <p><b>Issue Summary:</b> {escaped_issue}</p>
-        <p><b>Escalation Rationale:</b> {escaped_reason}</p>
-        <p><b>User's Original Message:</b> {escape(request.message)}</p>
-        <p><b>Requested Action:</b> Please review and assist as appropriate.</p>
+        <h3 style='color:#2a2a2a;'>Knowledge-Base Chatbot Incident Report</h3>
+        <table style='font-size:15px;border-collapse:collapse;width:100%;background:#fafafa;' border='1'>
+            <tr><td style='font-weight:bold;'>Reported By</td><td>{escaped_user}</td></tr>
+            <tr><td style='font-weight:bold;'>Reported At</td><td>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</td></tr>
+            <tr><td style='font-weight:bold;'>Summary</td><td>{escape(llm_analysis)}</td></tr>
+            <tr><td style='font-weight:bold;'>User Problem Details</td><td>{escape(request.message)}</td></tr>
+        </table>
+        <p style='color:#888;font-size:13px;margin-top:10px;'>This is a knowledge-base Chatbot issue. Please investigate promptly.</p>
         </body></html>
         """
         manager_email = "rihem.arfaoui@avocarbon.com"
-        subject = f"[KB Chatbot Alert] {short_reason}"
-        mailer.send_email(to_email=manager_email, subject=subject, html_body=recap_message)
-        return AssistantHelpResponse(success=True, answer=answer, escalated=True, escalation_message="Your request was escalated to the manager.")
-
+        subject = f"Technical Issue Reported by {escaped_user} (Knowledge-Base Chatbot)"
+        import logging
+        logging.info(f"[assistant_help] Scheduling escalation email to {manager_email} with subject '{subject}'")
+        def log_and_send_email(*args, **kwargs):
+            result = mailer.send_email(*args, **kwargs)
+            logging.info(f"[assistant_help] mailer.send_email returned: {result}")
+            return result
+        background_tasks.add_task(
+            log_and_send_email,
+            manager_email,
+            subject,
+            recap_message
+        )
+        return AssistantHelpResponse(success=True, answer="**✅ Your request has been escalated.**", escalated=True, escalation_message="Your request was escalated to the technical team.")
     return AssistantHelpResponse(success=True, answer=llm_response, escalated=False, escalation_message="")
 
 # Get service instances
