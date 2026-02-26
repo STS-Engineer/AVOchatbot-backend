@@ -1,3 +1,14 @@
+# Ensure users table structure matches chatbots_users
+ALTER TABLE users
+    ALTER COLUMN id SET NOT NULL,
+    ALTER COLUMN id TYPE UUID USING id::uuid,
+    ALTER COLUMN email SET NOT NULL,
+    ALTER COLUMN username SET NOT NULL;
+
+# Add foreign key constraint to conversations.user_id
+ALTER TABLE conversations
+    ADD CONSTRAINT conversations_user_id_fkey FOREIGN KEY (user_id)
+    REFERENCES users(id) ON DELETE CASCADE;
 -- ============================================
 -- Authentication & Chat Database Setup
 -- Run this in PgAdmin for your PostgreSQL database

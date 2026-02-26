@@ -12,7 +12,7 @@ import sys
 
 from app.core.config import settings
 from app.core.logging import setup_logging
-from app.api.routes import router as chat_router, init_services
+from app.api.routes import router as chat_router, init_services, start_periodic_sync
 from app.api.health import router as health_router
 from app.api.auth_routes import router as auth_router
 from app.api.otp_routes import router as otp_router
@@ -56,6 +56,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+start_periodic_sync(app)
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,

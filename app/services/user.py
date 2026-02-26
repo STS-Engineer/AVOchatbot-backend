@@ -12,7 +12,56 @@ from app.services.auth import get_auth_service
 
 class UserService:
     """Handles user-related database operations."""
-    
+
+    def sync_users_to_local_db(self):
+        """
+        Sync all users from the central users DB to the local (knowledge) DB.
+        Ensures every user in central is present in local, inserting if missing, updating if exists.
+        Handles email conflicts and guarantees all users are always present for conversation creation.
+        """
+        from app.services.database import get_database
+        knowledge_db = get_database()
+        try:
+            with self.db.get_session() as central_session:
+                central_users = central_session.execute(
+                    text("""
+                        SELECT id, email, username, password_hash, full_name, created_at, is_active, is_verified
+                        FROM users
+                    """)
+                ).fetchall()
+                # Convert SQLAlchemy row tuples to dicts for key access
+                central_users = [dict(u._mapping) if hasattr(u, '_mapping') else dict(zip(u.keys(), u)) for u in central_users]
+            with knowledge_db.get_session() as local_session:
+                for user in central_users:
+                    # Remove any user in local with same email but different ID (email conflict)
+                    conflict = local_session.execute(
+                        text("SELECT id FROM users WHERE email = :email AND id != :id"),
+                        {"email": user["email"], "id": user["id"]}
+                    ).fetchone()
+                    if conflict:
+                        local_session.execute(
+                            text("DELETE FROM users WHERE id = :conflict_id"),
+                            {"conflict_id": conflict[0]}
+                        )
+                    # Always insert or update user by ID
+                    local_session.execute(
+                        text("""
+                            INSERT INTO users (id, email, username, password_hash, full_name, created_at, is_active, is_verified)
+                            VALUES (:id, :email, :username, :password_hash, :full_name, :created_at, :is_active, :is_verified)
+                            ON CONFLICT (id) DO UPDATE SET
+                                email = EXCLUDED.email,
+                                username = EXCLUDED.username,
+                                password_hash = EXCLUDED.password_hash,
+                                full_name = EXCLUDED.full_name,
+                                created_at = EXCLUDED.created_at,
+                                is_active = EXCLUDED.is_active,
+                                is_verified = EXCLUDED.is_verified
+                        """), user)
+                local_session.commit()
+            logger.info("User table synchronized from central to local DB.")
+        except Exception as e:
+            logger.error(f"Failed to sync users to local DB: {e}")
+
     def __init__(self):
         """Initialize user service (uses central users database)."""
         from app.services.database import get_users_database
@@ -84,32 +133,8 @@ class UserService:
                 if user:
                     logger.info(f"User created successfully: {username}")
                     user_dict = dict(user._mapping)
-                    # Duplicate user to knowledge_DB
-                    try:
-                        from app.services.database import get_database
-                        knowledge_db = get_database()
-                        with knowledge_db.get_session() as ksession:
-                            ksession.execute(
-                                text("""
-                                    INSERT INTO users (id, email, username, password_hash, full_name, created_at, is_active, is_verified)
-                                    VALUES (:id, :email, :username, :password_hash, :full_name, :created_at, :is_active, :is_verified)
-                                    ON CONFLICT (id) DO NOTHING
-                                """),
-                                {
-                                    "id": user_dict["id"],
-                                    "email": user_dict["email"],
-                                    "username": user_dict["username"],
-                                    "password_hash": user_dict["password_hash"],
-                                    "full_name": user_dict.get("full_name"),
-                                    "created_at": user_dict["created_at"],
-                                    "is_active": user_dict["is_active"],
-                                    "is_verified": user_dict["is_verified"]
-                                }
-                            )
-                            ksession.commit()
-                        logger.info(f"User duplicated to knowledge_DB: {username}")
-                    except Exception as dup_e:
-                        logger.error(f"Failed to duplicate user to knowledge_DB: {dup_e}")
+                    # Sync all users after registration
+                    self.sync_users_to_local_db()
                     return user_dict
                 return None
         
@@ -208,6 +233,8 @@ class UserService:
             user.pop("password_hash", None)
             
             logger.info(f"User authenticated successfully: {email}")
+            # Sync all users after login
+            self.sync_users_to_local_db()
             return user
         
         except Exception as e:

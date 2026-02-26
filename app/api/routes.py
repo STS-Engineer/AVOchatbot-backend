@@ -4,6 +4,7 @@ Main API routes for the chatbot backend.
 """
 
 from fastapi import APIRouter, HTTPException, Query, Depends, File, UploadFile, BackgroundTasks
+from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from loguru import logger
 from pathlib import Path
@@ -20,6 +21,44 @@ from app.middleware.auth import get_current_user
 from datetime import datetime
 
 router = APIRouter(prefix="/api", tags=["chat"])
+# --- Periodic User Sync Background Task ---
+import threading
+import time
+from app.services.user import get_user_service
+
+# --- Manual User Sync Endpoint ---
+@router.post("/sync-users", summary="Manually sync users from central DB to local DB")
+async def manual_sync_users(current_user: dict = Depends(get_current_user)):
+    """
+    Manually trigger user sync from central users DB to local knowledge_base DB.
+    Requires authentication.
+    """
+    user_service = get_user_service()
+    try:
+        user_service.sync_users_to_local_db()
+        logger.info("Manual user sync triggered by: %s", current_user.get("email", "unknown"))
+        return {"success": True, "message": "Users synced successfully."}
+    except Exception as e:
+        logger.error(f"Manual user sync failed: {e}")
+        return {"success": False, "message": str(e)}
+
+def periodic_user_sync(interval_seconds=2):
+    def sync_loop():
+        user_service = get_user_service()
+        while True:
+            try:
+                user_service.sync_users_to_local_db()
+            except Exception as e:
+                logger.error(f"Periodic user sync failed: {e}")
+            time.sleep(interval_seconds)
+    t = threading.Thread(target=sync_loop, daemon=True)
+    t.start()
+
+# Start the background sync when the app starts
+def start_periodic_sync(app: FastAPI):
+    @app.on_event("startup")
+    async def _start_sync():
+        periodic_user_sync()
 
 # --- Image/File Upload Endpoint ---
 @router.post("/upload", summary="Upload an image or file")
