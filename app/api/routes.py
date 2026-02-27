@@ -139,24 +139,31 @@ User message: {request.message}
         conversation_history = []
         # Example: conversation_history = chat_service.get_history(user_id=current_user["id"], limit=5)
         llm_analysis_prompt = f"""
-    Summarize the user's technical issue for the escalation report. Make the summary visually clear, concise, and not overly specific. Use Markdown or HTML for formatting. Example: highlight the main problem, user observation . Avoid detailed troubleshooting steps.
+    Summarize the user's technical issue for the escalation report. Write a short, clear paragraph using simple, explainable phrases. Avoid tables, bullet points, or lists. Focus on the main problem, user observation, and impact. Do not include troubleshooting steps. Make it easy for anyone to understand.
     User message:
     {request.message}
     """
         llm_analysis = llm.generate_response(llm_analysis_prompt)
+        manager_email = "rihem.arfaoui@avocarbon.com"
         recap_message = f"""
-        <html><body>
-        <h3 style='color:#2a2a2a;'>Knowledge-Base Chatbot Incident Report</h3>
-        <table style='font-size:15px;border-collapse:collapse;width:100%;background:#fafafa;' border='1'>
-            <tr><td style='font-weight:bold;'>Reported By</td><td>{escaped_user}</td></tr>
-            <tr><td style='font-weight:bold;'>Reported At</td><td>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</td></tr>
-            <tr><td style='font-weight:bold;'>Summary</td><td>{escape(llm_analysis)}</td></tr>
-            <tr><td style='font-weight:bold;'>User Problem Details</td><td>{escape(request.message)}</td></tr>
-        </table>
-        <p style='color:#888;font-size:13px;margin-top:10px;'>This is a knowledge-base Chatbot issue. Please investigate promptly.</p>
+        <html><body style='font-family:Segoe UI,Arial,sans-serif;'>
+        <h2 style='color:#1a73e8;margin-bottom:16px;'>🚨 Knowledge-Base Chatbot Incident Report</h2>
+        <div style='background:#fff;border-radius:8px;box-shadow:0 2px 8px #eee;padding:24px;'>
+            <div style='font-size:16px;background:#fafafa;padding:18px;border-radius:8px;margin-bottom:24px;'>
+                <strong>Reported By:</strong> {escaped_user}<br>
+                <strong>Reported At:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}<br>
+                <strong>Summary:</strong>
+                <div style='background:#ffe0e0;border-radius:6px;padding:12px;font-size:17px;color:#b71c1c;font-weight:bold;margin-top:8px;'>{escape(llm_analysis)}</div>
+                <strong>User Problem Details:</strong> {escape(request.message)}
+            </div>
+            <div style='margin-top:18px;'>
+                <a href='mailto:{manager_email}?subject=Incident%20Acknowledged' style='display:inline-block;background:#1a73e8;color:#fff;padding:10px 22px;border-radius:6px;text-decoration:none;font-weight:bold;margin-right:12px;'>Acknowledge</a>
+                <a href='mailto:{escaped_user}?subject=Follow-up%20on%20Chatbot%20Issue' style='display:inline-block;background:#43a047;color:#fff;padding:10px 22px;border-radius:6px;text-decoration:none;font-weight:bold;'>Reply to User</a>
+            </div>
+        </div>
+        <p style='color:#888;font-size:14px;margin-top:18px;'>This is a knowledge-base Chatbot issue. Please investigate promptly.</p>
         </body></html>
         """
-        manager_email = "rihem.arfaoui@avocarbon.com"
         subject = f"Technical Issue Reported by {escaped_user} (Knowledge-Base Chatbot)"
         import logging
         logging.info(f"[assistant_help] Scheduling escalation email to {manager_email} with subject '{subject}'")
