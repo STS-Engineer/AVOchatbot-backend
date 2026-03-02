@@ -165,6 +165,7 @@ User message: {request.message}
         </body></html>
         """
         subject = f"Technical Issue Reported by {escaped_user} (Knowledge-Base Chatbot)"
+        escalation_cc_emails = ["taha.khiari@avocarbon.com"]
         import logging
         logging.info(f"[assistant_help] Scheduling escalation email to {manager_email} with subject '{subject}'")
         def log_and_send_email(*args, **kwargs):
@@ -175,7 +176,8 @@ User message: {request.message}
             log_and_send_email,
             manager_email,
             subject,
-            recap_message
+            recap_message,
+            escalation_cc_emails,
         )
         return AssistantHelpResponse(success=True, answer="**✅ Your request has been escalated.**", escalated=True, escalation_message="Your request was escalated to the technical team.")
     return AssistantHelpResponse(success=True, answer=llm_response, escalated=False, escalation_message="")
@@ -193,7 +195,6 @@ def init_services():
 
 
 
-# Complaint/Assistance endpoint
 from app.models.schemas import ComplaintRequest, ComplaintResponse
 from app.core.config import settings
 import sys
