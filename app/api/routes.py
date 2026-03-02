@@ -10,6 +10,8 @@ from loguru import logger
 from pathlib import Path
 from typing import Optional
 from html import escape
+import json
+import re
 from app.models.schemas import (
     ChatRequest, ChatResponse, HistoryRequest, HistoryResponse,
     SearchRequest, SearchResponse, HistoryMessage, EditMessageRequest,
@@ -17,7 +19,7 @@ from app.models.schemas import (
 )
 from app.services.chat import get_chat_service
 from app.services.rag import get_rag_service
-from app.middleware.auth import get_current_user
+from app.middleware.auth import get_current_user, get_current_user_optional
 from datetime import datetime
 
 router = APIRouter(prefix="/api", tags=["chat"])
@@ -100,44 +102,76 @@ def _format_professional_issue(text: str) -> str:
 async def assistant_help(
     request: AssistantHelpRequest,
     background_tasks: BackgroundTasks,
-    current_user: dict = Depends(get_current_user)
+    current_user: Optional[dict] = Depends(get_current_user_optional)
 ) -> AssistantHelpResponse:
     """
     Assistant answers user help/complaint. If escalation is needed, an email is sent to the manager.
     """
-    logger.info(f"[assistant_help] Endpoint called. Payload: {{'message': request.message, 'user': {current_user.get('email', 'unknown')}}}")
+    reporter_email = (current_user or {}).get("email", "anonymous-user")
+    logger.info(f"[assistant_help] Endpoint called. Payload: {{'message': request.message, 'user': {reporter_email}}}")
     # Use LLM to answer the question and decide escalation
     from app.services.llm import get_llm_service
     llm = get_llm_service()
-    user_message_lower = request.message.lower()
-    # Escalate immediately for any technical problem, no more asking the user
     escalation_prompt = f"""
-You are a professional support assistant. If the user's message describes a technical problem (e.g. chatbot not working, errors, bugs, service down, etc),If the user does not mention what exactly is broke , ask him once then confirm to him  and escalate immediately to the technical team without asking the user . 
-Your answer must be very short, visually clear, and always use Markdown or HTML for formatting. Do not explain too much , do not ask for confirmation if the user said to report the problem, do not repeat yourself. Just confirm escalation in a single short sentence. If it's not a technical problem, answer concisely and beautifully.
+You are a professional support assistant.
+Decide whether the user's request must be escalated to the technical/support team.
+
+Rules:
+1) If the user reports a technical issue, bug, service disruption, malfunction, or explicitly asks to contact/report to a human team, set "escalate" to true.
+2) If escalation is not needed, set "escalate" to false.
+3) Write a very short, clear end-user reply in the same language as the user message.
+4) Return ONLY valid JSON (no markdown, no code fences, no extra text) with exactly these keys:
+   {{"answer": "<short reply>", "escalate": true|false}}
 
 User message: {request.message}
 """
-    llm_response = llm.generate_response(escalation_prompt)
-    logger.info(f"[assistant_help] LLM response: {llm_response}")
+    llm_response_raw = llm.generate_response(escalation_prompt)
+    logger.info(f"[assistant_help] LLM raw response: {llm_response_raw}")
+
+    parsed_response = None
+    try:
+        parsed_response = json.loads(llm_response_raw)
+    except Exception:
+        json_match = re.search(r"\{[\s\S]*\}", llm_response_raw or "")
+        if json_match:
+            try:
+                parsed_response = json.loads(json_match.group(0))
+            except Exception:
+                parsed_response = None
+
     escalate = False
-    llm_response_lower = llm_response.lower()
-    if (
-        "escalate_now" in llm_response_lower
-        or "has been escalated" in llm_response_lower
-        or "notified" in llm_response_lower
-        or "escalated to the technical team" in llm_response_lower
-        or "escalated" in llm_response_lower
-        or "escalating" in llm_response_lower
-        or "issue reported" in llm_response_lower
-        or "forwarded" in llm_response_lower
-        or "team member" in llm_response_lower
-        or "arrange a call" in llm_response_lower
-    ):
-        escalate = True
-    logger.info(f"[assistant_help] Escalation decision: escalate={escalate} for user: {current_user.get('email', 'unknown')}")
+    assistant_answer = ""
+
+    if isinstance(parsed_response, dict):
+        escalate = bool(parsed_response.get("escalate", False))
+        assistant_answer = str(parsed_response.get("answer", "")).strip()
+
+    if not assistant_answer:
+        assistant_answer = (llm_response_raw or "").strip()
+
+    if not isinstance(parsed_response, dict):
+        logger.warning("[assistant_help] LLM response was not valid JSON. Falling back to keyword-based escalation detection.")
+        llm_response_lower = assistant_answer.lower()
+        if (
+            "escalate_now" in llm_response_lower
+            or "has been escalated" in llm_response_lower
+            or "notified" in llm_response_lower
+            or "escalated to the technical team" in llm_response_lower
+            or "escalated" in llm_response_lower
+            or "escalating" in llm_response_lower
+            or "issue reported" in llm_response_lower
+            or "forwarded" in llm_response_lower
+            or "team member" in llm_response_lower
+            or "arrange a call" in llm_response_lower
+        ):
+            escalate = True
+
+    if not assistant_answer:
+        assistant_answer = "Your request has been escalated." if escalate else "How can I help you?"
+    logger.info(f"[assistant_help] Escalation decision: escalate={escalate} for user: {reporter_email}")
     if escalate:
-        logger.info(f"[assistant_help] Entered escalation block for user: {current_user.get('email', 'unknown')}")
-        escaped_user = escape(current_user.get("email", "user"))
+        logger.info(f"[assistant_help] Entered escalation block for user: {reporter_email}")
+        escaped_user = escape(reporter_email)
         # Fetch recent conversation history (stub: empty for now)
         conversation_history = []
         # Example: conversation_history = chat_service.get_history(user_id=current_user["id"], limit=5)
@@ -182,8 +216,8 @@ User message: {request.message}
             html_body=recap_message,
             cc_emails=escalation_cc_emails,
         )
-        return AssistantHelpResponse(success=True, answer="**✅ Your request has been escalated.**", escalated=True, escalation_message="Your request was escalated to the technical team.")
-    return AssistantHelpResponse(success=True, answer=llm_response, escalated=False, escalation_message="")
+        return AssistantHelpResponse(success=True, answer=assistant_answer, escalated=True, escalation_message="Your request was escalated to the technical team.")
+    return AssistantHelpResponse(success=True, answer=assistant_answer, escalated=False, escalation_message="")
 
 # Get service instances
 chat_service = None
