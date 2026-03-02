@@ -129,6 +129,9 @@ User message: {request.message}
         or "escalated" in llm_response_lower
         or "escalating" in llm_response_lower
         or "issue reported" in llm_response_lower
+        or "forwarded" in llm_response_lower
+        or "team member" in llm_response_lower
+        or "arrange a call" in llm_response_lower
     ):
         escalate = True
     logger.info(f"[assistant_help] Escalation decision: escalate={escalate} for user: {current_user.get('email', 'unknown')}")
@@ -174,10 +177,10 @@ User message: {request.message}
             return result
         background_tasks.add_task(
             log_and_send_email,
-            manager_email,
-            subject,
-            recap_message,
-            escalation_cc_emails,
+            to_email=manager_email,
+            subject=subject,
+            html_body=recap_message,
+            cc_emails=escalation_cc_emails,
         )
         return AssistantHelpResponse(success=True, answer="**✅ Your request has been escalated.**", escalated=True, escalation_message="Your request was escalated to the technical team.")
     return AssistantHelpResponse(success=True, answer=llm_response, escalated=False, escalation_message="")
