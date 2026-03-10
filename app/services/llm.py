@@ -1,5 +1,5 @@
 """
-LLM service using Groq API.
+LLM service supporting Groq and OpenAI providers.
 """
 
 from typing import Optional
@@ -12,20 +12,48 @@ try:
 except ImportError:
     GROQ_AVAILABLE = False
 
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+
 
 class LLMService:
-    """Groq LLM client for generating responses."""
+    """LLM client for generating responses."""
     
     def __init__(self):
         """Initialize LLM service."""
         self.client = None
-        self.model = settings.LLM_MODEL
+        self.provider = (settings.LLM_PROVIDER or "groq").strip().lower()
+        self.model = settings.LLM_MODEL if self.provider == "groq" else settings.OPENAI_LLM_MODEL
         self.temperature = settings.LLM_TEMPERATURE
         self.max_tokens = settings.LLM_MAX_TOKENS
         self._init_client()
     
     def _init_client(self):
-        """Initialize Groq client."""
+        """Initialize provider-specific LLM client."""
+        if self.provider == "openai":
+            if not OPENAI_AVAILABLE:
+                logger.warning("OpenAI library not available. Install with: pip install openai")
+                return
+            try:
+                if not settings.OPENAI_API_KEY:
+                    logger.warning("OPENAI_API_KEY not provided in environment")
+                    return
+                self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
+                logger.info(f"OpenAI LLM client initialized. Model: {self.model}")
+                return
+            except Exception as e:
+                logger.error(f"Failed to initialize OpenAI client: {e}")
+                return
+
+        # Default to Groq when provider is unknown or set to groq
+        if self.provider not in {"groq", "openai"}:
+            logger.warning(f"Unknown LLM_PROVIDER '{self.provider}', defaulting to groq")
+            self.provider = "groq"
+            self.model = settings.LLM_MODEL
+
         if not GROQ_AVAILABLE:
             logger.warning("Groq library not available. Install with: pip install groq")
             return
@@ -34,13 +62,10 @@ class LLMService:
             if not settings.GROQ_API_KEY:
                 logger.warning("GROQ_API_KEY not provided in environment")
                 return
-            
-            # Initialize Groq client - only pass api_key
             self.client = groq.Groq(api_key=settings.GROQ_API_KEY)
             logger.info(f"Groq LLM client initialized. Model: {self.model}")
         except Exception as e:
             logger.error(f"Failed to initialize Groq client: {e}")
-            # Service degrades gracefully - client stays None
     
     def generate_response(
         self,
@@ -49,6 +74,7 @@ class LLMService:
         temperature: Optional[float] = None,
         conversation_history: Optional[list[dict[str, str]]] = None,
         has_kb_context: bool = False,
+        has_file_context: bool = False,
     ) -> str:
         """
         Flexible response generation: Use KB when available, conversation when not.
@@ -65,8 +91,8 @@ class LLMService:
         """
         try:
             if not self.client:
-                logger.warning("Groq client not initialized")
-                return "LLM service not available. Please check your GROQ_API_KEY configuration."
+                logger.warning("LLM client not initialized")
+                return "LLM service not available. Please check your LLM provider configuration."
             
             temp = temperature if temperature is not None else self.temperature
             
@@ -81,6 +107,12 @@ Your behavior adapts based on available context:
 - Cite sources when referencing specific information
 - Stay faithful to the content provided
 - Don't describe images - they're shown separately in the UI
+
+**When uploaded file context is provided:**
+- Prioritize uploaded file analysis for the user's answer
+- Treat uploaded file context as user-provided source of truth for this turn
+- Only use KB context as secondary support unless user explicitly asks for comparison with KB/policies
+- If the uploaded file context indicates unreadable/empty content, clearly say what could not be read
 
 **When NO KB context (conversation mode):**
 - Use conversation history to answer follow-up questions
@@ -125,7 +157,8 @@ KNOWLEDGE BASE CONTEXT:
 
 USER QUESTION: {prompt}
 
-Provide a helpful response using the KB context above. Cite sources when relevant.
+Provide a helpful response using the context above.
+If uploaded file context exists, focus the answer on that file first.
 
 Answer:"""
             else:
@@ -141,23 +174,22 @@ Provide a helpful response based on the conversation history. If this is a follo
 
 Answer:"""
             
-            chat_completion = self.client.chat.completions.create(
+            response = self._chat_completion(
                 messages=[
                     {"role": "system", "content": system_message},
                     {"role": "user", "content": user_message}
                 ],
-                model=self.model,
                 temperature=temp,
                 max_tokens=self.max_tokens,
             )
-            
-            response = chat_completion.choices[0].message.content
+            if not response:
+                return "I could not generate a response right now."
             mode = "KB" if has_kb_context else "Conversation"
-            logger.info(f"Response generated via Groq ({mode} mode)")
+            logger.info(f"Response generated via {self.provider} ({mode} mode)")
             return response
         
         except Exception as e:
-            logger.error(f"Error generating response with Groq: {e}")
+            logger.error(f"Error generating response with LLM provider: {e}")
             return f"Error generating response: {str(e)}"
 
     def _format_conversation_history(self, history: Optional[list[dict[str, str]]]) -> str:
@@ -180,7 +212,7 @@ Answer:"""
             return None
 
         if not self.client:
-            logger.warning("Groq client not initialized; skipping translation")
+            logger.warning("LLM client not initialized; skipping translation")
             return None
 
         try:
@@ -189,17 +221,14 @@ Answer:"""
                 "Return only the translation, with no extra commentary."
             )
 
-            chat_completion = self.client.chat.completions.create(
+            translation = self._chat_completion(
                 messages=[
                     {"role": "system", "content": system_message},
                     {"role": "user", "content": text}
                 ],
-                model=self.model,
                 temperature=0.0,
                 max_tokens=min(512, self.max_tokens),
             )
-
-            translation = chat_completion.choices[0].message.content
             if not translation:
                 return None
             return translation.strip()
@@ -213,7 +242,7 @@ Answer:"""
             return None
 
         if not self.client:
-            logger.warning("Groq client not initialized; skipping domain classification")
+            logger.warning("LLM client not initialized; skipping domain classification")
             return None
 
         try:
@@ -225,17 +254,14 @@ Answer:"""
             options = "\n".join([f"- {title}" for title in candidates])
             user_message = f"User query: {text}\n\nDomain titles:\n{options}"
 
-            chat_completion = self.client.chat.completions.create(
+            choice = self._chat_completion(
                 messages=[
                     {"role": "system", "content": system_message},
                     {"role": "user", "content": user_message}
                 ],
-                model=self.model,
                 temperature=0.0,
                 max_tokens=min(256, self.max_tokens),
             )
-
-            choice = chat_completion.choices[0].message.content
             if not choice:
                 return None
             choice = choice.strip()
@@ -247,33 +273,75 @@ Answer:"""
             return None
 
     def _call_groq(self, prompt: str, max_tokens: int = 100, temperature: float = 0.0) -> Optional[str]:
-        """Generic method to call Groq for simple tasks."""
+        """Backward-compatible helper used by existing code paths."""
+        return self._call_llm(prompt=prompt, max_tokens=max_tokens, temperature=temperature)
+
+    def _call_llm(self, prompt: str, max_tokens: int = 100, temperature: float = 0.0) -> Optional[str]:
+        """Generic method to call the configured LLM provider for simple tasks."""
         if not self.client:
-            logger.warning("Groq client not initialized")
+            logger.warning("LLM client not initialized")
             return None
 
         try:
-            chat_completion = self.client.chat.completions.create(
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
-                model=self.model,
+            response = self._chat_completion(
+                messages=[{"role": "user", "content": prompt}],
                 temperature=temperature,
                 max_tokens=min(max_tokens, self.max_tokens),
             )
-
-            response = chat_completion.choices[0].message.content
             if response:
-                logger.debug(f"_call_groq response: '{response[:100]}'")
+                logger.debug(f"_call_llm response: '{response[:100]}'")
             else:
-                logger.warning(f"_call_groq got None/empty response")
+                logger.warning(f"_call_llm got None/empty response")
                 logger.warning(f"Prompt: '{prompt[:200]}'")
                 logger.warning(f"Model: {self.model}, max_tokens: {max_tokens}, temp: {temperature}")
             return response.strip() if response else None
         except Exception as e:
-            logger.error(f"Groq call failed: {e}", exc_info=True)
+            logger.error(f"LLM call failed: {e}", exc_info=True)
             logger.error(f"Prompt was: '{prompt[:200]}'")
             return None
+
+    def summarize_uploaded_text(self, file_name: str, extracted_text: str) -> Optional[str]:
+        """Generate a concise analysis for uploaded document text."""
+        if not extracted_text.strip():
+            return None
+
+        prompt = f"""You are analyzing a user-uploaded file for a support chatbot.
+
+File name: {file_name}
+
+Task:
+1) Summarize the most important content in 5-8 bullet points.
+2) Identify key entities (names, dates, amounts, IDs) if present.
+3) Mention any risks, inconsistencies, or missing information.
+
+Return concise markdown.
+
+Document text:
+{extracted_text[:12000]}
+"""
+        return self._call_llm(prompt=prompt, max_tokens=700, temperature=0.2)
+
+    def _chat_completion(self, messages: list[dict[str, str]], temperature: float, max_tokens: int) -> Optional[str]:
+        """Execute chat completion against configured provider."""
+        if not self.client:
+            return None
+
+        if self.provider == "openai":
+            completion = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return completion.choices[0].message.content
+
+        completion = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return completion.choices[0].message.content
 
 
 # Global LLM instance

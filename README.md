@@ -149,8 +149,11 @@ DB_PASSWORD=your_password
 DB_SSLMODE=disable
 
 # APIs
+LLM_PROVIDER=groq
 GROQ_API_KEY=your_groq_key
 OPENAI_API_KEY=your_openai_key
+OPENAI_LLM_MODEL=gpt-4o-mini
+LLM_MODEL=openai/gpt-oss-120b
 
 # RAG Settings
 TOP_K_RESULTS=8
@@ -182,10 +185,16 @@ Retrieval Augmented Generation:
 - Returns formatted context and items
 
 ### LLMService
-Groq API integration:
+LLM provider integration (Groq/OpenAI):
 - Generates responses based on query + context
 - Configurable temperature and max tokens
 - System prompt for role definition
+
+### File Upload Analysis
+- Uploaded files are saved in `backend/uploads/`
+- Supported readable file types: `.txt`, `.csv`, `.pdf`, `.docx`, `.xls`, `.xlsx`
+- File text is extracted and analyzed with the configured LLM provider
+- Analysis is included in chat context when uploaded file paths are sent in `POST /api/chat`
 
 ### EmbeddingService
 OpenAI embeddings:

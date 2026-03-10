@@ -47,10 +47,14 @@ class Settings(BaseSettings):
     USERS_DB_SSLMODE: str
     
     # Groq LLM (required from environment)
+    LLM_PROVIDER: str = "groq"  # groq | openai
     GROQ_API_KEY: str
     LLM_TEMPERATURE: float = 0.7
     LLM_MAX_TOKENS: int = 2048
     LLM_MODEL: str = "openai/gpt-oss-120b"
+
+    # OpenAI chat model (used when LLM_PROVIDER=openai)
+    OPENAI_LLM_MODEL: str = "gpt-4o-mini"
     
     # OpenAI (Embeddings) (required from environment)
     OPENAI_API_KEY: str

@@ -26,13 +26,18 @@ class ChatRequest(BaseModel):
     include_context: bool = Field(default=True, description="Include retrieved context in response")
     top_k: Optional[int] = Field(default=8, ge=1, le=20, description="Number of context items to retrieve")
     conversation_id: Optional[str] = Field(default=None, description="Conversation identifier")
+    uploaded_files: Optional[List[str]] = Field(
+        default=None,
+        description="List of uploaded file names/paths to analyze with the LLM"
+    )
     
     class Config:
         json_schema_extra = {
             "example": {
                 "message": "What is the process for handling late payment requests?",
                 "include_context": True,
-                "top_k": 8
+                "top_k": 8,
+                "uploaded_files": ["invoice-jan.pdf"]
             }
         }
 

@@ -20,4 +20,8 @@ python-multipart
 python-jose[cryptography]
 passlib[bcrypt]
 email-validator
+openai
+pypdf
+python-docx
+openpyxl
 

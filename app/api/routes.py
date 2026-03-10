@@ -19,6 +19,7 @@ from app.models.schemas import (
 )
 from app.services.chat import get_chat_service
 from app.services.rag import get_rag_service
+from app.services.file_analysis import get_file_analysis_service
 from app.middleware.auth import get_current_user, get_current_user_optional
 from datetime import datetime
 
@@ -66,17 +67,37 @@ def start_periodic_sync(app: FastAPI):
 @router.post("/upload", summary="Upload an image or file")
 async def upload_file(file: UploadFile = File(...)):
     """
-    Upload an image or file. Saves to uploads/ directory and returns the file path.
+    Upload an image or document, then attempt text extraction and LLM analysis.
     """
     from pathlib import Path
     import shutil
+    import uuid
+
     uploads_dir = Path(__file__).parent.parent.parent / "uploads"
     uploads_dir.mkdir(parents=True, exist_ok=True)
-    file_path = uploads_dir / file.filename
+
+    safe_name = Path(file.filename or "upload.bin").name
+    stored_name = f"{uuid.uuid4().hex[:8]}_{safe_name}"
+    file_path = uploads_dir / stored_name
+
     # Save file
     with file_path.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
-    return {"success": True, "file_path": file.filename, "url": f"/uploads/{file.filename}"}
+
+    analyzer = get_file_analysis_service()
+    analysis_result = analyzer.analyze_file(file_path)
+
+    return {
+        "success": True,
+        "file_path": stored_name,
+        "original_name": safe_name,
+        "url": f"/uploads/{stored_name}",
+        "readable": analysis_result.get("readable", False),
+        "analysis": analysis_result.get("analysis"),
+        "analysis_error": analysis_result.get("error"),
+        "extracted_chars": analysis_result.get("extracted_chars", 0),
+        "preview": analysis_result.get("preview"),
+    }
 
 
 def _truncate_for_subject(text: str, max_length: int = 70) -> str:
@@ -307,6 +328,7 @@ async def chat(
             top_k=request.top_k,
             include_context=request.include_context,
             conversation_id=request.conversation_id,
+            uploaded_files=request.uploaded_files,
         )
         
         if result["success"]:

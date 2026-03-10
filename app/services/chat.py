@@ -9,6 +9,7 @@ from app.services.rag import get_rag_service
 from app.services.llm import get_llm_service
 from app.services.embedding import get_embedding_service
 from app.services.conversation import get_conversation_service
+from app.services.file_analysis import get_file_analysis_service
 
 
 class ChatService:
@@ -34,6 +35,7 @@ class ChatService:
         top_k: Optional[int] = None,
         include_context: bool = True,
         conversation_id: Optional[str] = None,
+        uploaded_files: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Intelligent message processing with database persistence.
@@ -83,6 +85,11 @@ class ChatService:
             
             # STEP 1: Let LLM decide if we need to search KB
             needs_kb_search = self._should_search_kb(message, history_for_prompt, last_context)
+
+            # If user asks to analyze uploaded docs, prioritize file context first.
+            if uploaded_files and self._is_file_analysis_intent(message):
+                logger.info("Detected file-analysis intent; skipping KB retrieval for this turn")
+                needs_kb_search = False
             
             used_context_items: List[Dict[str, Any]] = []
             used_formatted_context = ""
@@ -113,13 +120,50 @@ class ChatService:
                     logger.info("No KB results found - will use conversation context")
             else:
                 logger.info(f"KB search not needed - using conversation context: '{message[:80]}'")
+
+            # STEP 2.5: Add uploaded file context (if any)
+            file_context = ""
+            if uploaded_files:
+                file_context = get_file_analysis_service().build_chat_file_context(uploaded_files, message)
+                if file_context:
+                    logger.info(f"Added uploaded file context from {len(uploaded_files)} file(s)")
+
+            if uploaded_files and not file_context and not used_context_items:
+                response = (
+                    "I could not extract readable text from the uploaded file(s). "
+                    "Please upload a text-based file (TXT/CSV/DOCX/XLSX) or a searchable PDF."
+                )
+
+                assistant_message_id = self.conversation_service.add_message(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=response,
+                    context_used=None,
+                    context_count=0
+                )
+
+                logger.info(f"Returned unreadable-file guidance (assistant_message_id={assistant_message_id})")
+                return {
+                    "success": True,
+                    "message": response,
+                    "context": None,
+                    "context_items": None,
+                    "context_count": 0,
+                    "conversation_id": conversation_id,
+                    "timestamp": datetime.now().isoformat()
+                }
+
+            combined_context = used_formatted_context
+            if file_context:
+                combined_context = "\n\n".join([part for part in [used_formatted_context, file_context] if part])
             
             # STEP 3: Generate response with available context
             response = self.llm_service.generate_response(
                 message,
-                context=used_formatted_context,
+                context=combined_context,
                 conversation_history=history_for_prompt,
-                has_kb_context=bool(used_context_items),
+                has_kb_context=bool(used_context_items or file_context),
+                has_file_context=bool(file_context),
             )
             
             # Store assistant response in database
@@ -127,7 +171,7 @@ class ChatService:
                 conversation_id=conversation_id,
                 role="assistant",
                 content=response,
-                context_used=used_formatted_context if used_formatted_context else None,
+                context_used=combined_context if combined_context else None,
                 context_count=len(used_context_items)
             )
             
@@ -142,7 +186,7 @@ class ChatService:
             result = {
                 "success": True,
                 "message": response,
-                "context": used_formatted_context if include_context and used_formatted_context else None,
+                "context": combined_context if include_context and combined_context else None,
                 "context_items": used_context_items if include_context and used_context_items else None,
                 "context_count": len(used_context_items),
                 "conversation_id": conversation_id,
@@ -160,6 +204,25 @@ class ChatService:
                 "message": "An error occurred while processing your message. Please try again.",
                 "timestamp": datetime.now().isoformat()
             }
+
+    def _is_file_analysis_intent(self, message: str) -> bool:
+        """Detect common intents where user asks to analyze uploaded files."""
+        lowered = (message or "").strip().lower()
+        if not lowered:
+            return False
+
+        markers = [
+            "uploaded file",
+            "uploaded files",
+            "analyze",
+            "analyse",
+            "summarize",
+            "resume",
+            "cv",
+            "document",
+            "read this file",
+        ]
+        return any(token in lowered for token in markers)
 
     def edit_message_and_respond(
         self,
