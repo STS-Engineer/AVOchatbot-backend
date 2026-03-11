@@ -33,6 +33,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"Environment: {settings.ENVIRONMENT}")
     logger.info(f"Debug: {settings.DEBUG}")
     logger.info(f"Database: {settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}")
+    logger.info(f"Uploads directory: {settings.uploads_dir_path}")
     logger.info("=" * 50)
     
     init_services()
@@ -73,16 +74,9 @@ app.include_router(chat_router)
 app.include_router(health_router)
 
 # Mount uploads directory for static file serving
-# Check for uploads directory in project root
-uploads_path = Path(__file__).parent.parent / "uploads"
-if not uploads_path.exists():
-    uploads_path = Path(__file__).parent.parent.parent / "rag_project" / "uploads"
-
-if uploads_path.exists():
-    app.mount("/uploads", StaticFiles(directory=str(uploads_path)), name="uploads")
-    logger.info(f"Mounted uploads directory: {uploads_path}")
-else:
-    logger.warning(f"Uploads directory not found: {uploads_path}")
+uploads_path = settings.uploads_dir_path
+app.mount("/uploads", StaticFiles(directory=str(uploads_path)), name="uploads")
+logger.info(f"Mounted uploads directory: {uploads_path}")
 @app.get("/", tags=["root"])
 async def root():
     """Root endpoint."""

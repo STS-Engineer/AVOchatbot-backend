@@ -83,6 +83,9 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     LOG_FILE: str = "logs/backend.log"
 
+    # Uploads
+    UPLOADS_DIR: str = ""
+
     # SMTP (for assistant/complaint email feature)
     SMTP_HOST: str = "smtp.avocarbon.com"  # Default, can be overridden in .env
     SMTP_PORT: int = 25
@@ -109,6 +112,23 @@ class Settings(BaseSettings):
         from urllib.parse import quote
         password = quote(self.USERS_DB_PASSWORD, safe='')
         return f"postgresql://{self.USERS_DB_USER}:{password}@{self.USERS_DB_HOST}:{self.USERS_DB_PORT}/{self.USERS_DB_NAME}"
+
+    @property
+    def uploads_dir_path(self) -> Path:
+        """Resolve the uploads directory, preferring persistent Azure App Service storage."""
+        if self.UPLOADS_DIR:
+            uploads_dir = Path(self.UPLOADS_DIR)
+        else:
+            azure_home = os.getenv("HOME")
+            is_azure_app_service = bool(os.getenv("WEBSITE_SITE_NAME") or os.getenv("WEBSITE_INSTANCE_ID"))
+
+            if azure_home and is_azure_app_service:
+                uploads_dir = Path(azure_home) / "data" / "uploads"
+            else:
+                uploads_dir = PROJECT_ROOT / "uploads"
+
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+        return uploads_dir
 
 
 # Create settings instance

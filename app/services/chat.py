@@ -82,14 +82,50 @@ class ChatService:
             history = self._load_history_from_db(conversation_id)
             history_for_prompt = self._get_history_window(history, exclude_latest=True)
             last_context = self.last_context_by_id.get(conversation_id, "")
+            file_analysis_requested = bool(uploaded_files and self._is_file_analysis_intent(message))
+            file_context = ""
+
+            if uploaded_files:
+                logger.info(f"Chat request includes uploaded files: {uploaded_files}")
+                file_context = get_file_analysis_service().build_chat_file_context(uploaded_files, message)
+                if file_context:
+                    logger.info(f"Added uploaded file context from {len(uploaded_files)} file(s)")
             
             # STEP 1: Let LLM decide if we need to search KB
             needs_kb_search = self._should_search_kb(message, history_for_prompt, last_context)
 
             # If user asks to analyze uploaded docs, prioritize file context first.
-            if uploaded_files and self._is_file_analysis_intent(message):
-                logger.info("Detected file-analysis intent; skipping KB retrieval for this turn")
+            if file_analysis_requested:
+                logger.info("Detected file-analysis intent; prioritizing uploaded file context for this turn")
                 needs_kb_search = False
+
+                if not file_context:
+                    response = (
+                        "I could not access readable content from the uploaded file(s). "
+                        "This can happen if the file was not available on the server anymore or if the PDF is image-based/non-searchable. "
+                        "Please re-upload the document or use a searchable PDF/TXT/CSV/DOCX/XLSX file."
+                    )
+
+                    assistant_message_id = self.conversation_service.add_message(
+                        conversation_id=conversation_id,
+                        role="assistant",
+                        content=response,
+                        context_used=None,
+                        context_count=0
+                    )
+
+                    logger.info(
+                        f"Returned unreadable/missing uploaded-file guidance (assistant_message_id={assistant_message_id})"
+                    )
+                    return {
+                        "success": True,
+                        "message": response,
+                        "context": None,
+                        "context_items": None,
+                        "context_count": 0,
+                        "conversation_id": conversation_id,
+                        "timestamp": datetime.now().isoformat()
+                    }
             
             used_context_items: List[Dict[str, Any]] = []
             used_formatted_context = ""
@@ -120,13 +156,6 @@ class ChatService:
                     logger.info("No KB results found - will use conversation context")
             else:
                 logger.info(f"KB search not needed - using conversation context: '{message[:80]}'")
-
-            # STEP 2.5: Add uploaded file context (if any)
-            file_context = ""
-            if uploaded_files:
-                file_context = get_file_analysis_service().build_chat_file_context(uploaded_files, message)
-                if file_context:
-                    logger.info(f"Added uploaded file context from {len(uploaded_files)} file(s)")
 
             if uploaded_files and not file_context and not used_context_items:
                 response = (
@@ -217,10 +246,18 @@ class ChatService:
             "analyze",
             "analyse",
             "summarize",
+            "summary",
             "resume",
             "cv",
             "document",
             "read this file",
+            "content of this file",
+            "what is in this file",
+            "what's in this file",
+            "what is the content of this file",
+            "what's the content of this file",
+            "whats the content of this file",
+            "tell me about this file",
         ]
         return any(token in lowered for token in markers)
 

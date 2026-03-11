@@ -10,6 +10,7 @@ import csv
 
 from loguru import logger
 
+from app.core.config import settings
 from app.services.llm import get_llm_service
 
 try:
@@ -81,12 +82,13 @@ class FileAnalysisService:
         if not uploaded_files:
             return ""
 
-        uploads_dir = Path(__file__).parent.parent.parent / "uploads"
+        uploads_dir = settings.uploads_dir_path
         contexts: List[str] = []
 
         for raw_path in uploaded_files:
             safe_name = Path(str(raw_path).replace("\\", "/")).name
             candidate = uploads_dir / safe_name
+            logger.info(f"Building chat file context for uploaded file: raw='{raw_path}', safe='{safe_name}'")
 
             if not candidate.exists() or not candidate.is_file():
                 logger.warning(f"Uploaded file not found for chat context: {raw_path}")
@@ -94,6 +96,7 @@ class FileAnalysisService:
 
             extracted = self._extract_text(candidate)
             if not extracted.strip():
+                logger.warning(f"Uploaded file had no readable text for chat context: {candidate.name}")
                 continue
 
             # Use light summarization to control token usage.
@@ -109,6 +112,7 @@ class FileAnalysisService:
                     ]
                 )
             )
+            logger.info(f"Built chat file context for {candidate.name} ({len(extracted)} chars extracted)")
 
         if not contexts:
             return ""

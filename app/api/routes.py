@@ -21,6 +21,7 @@ from app.services.chat import get_chat_service
 from app.services.rag import get_rag_service
 from app.services.file_analysis import get_file_analysis_service
 from app.middleware.auth import get_current_user, get_current_user_optional
+from app.core.config import settings
 from datetime import datetime
 
 router = APIRouter(prefix="/api", tags=["chat"])
@@ -73,7 +74,7 @@ async def upload_file(file: UploadFile = File(...)):
     import shutil
     import uuid
 
-    uploads_dir = Path(__file__).parent.parent.parent / "uploads"
+    uploads_dir = settings.uploads_dir_path
     uploads_dir.mkdir(parents=True, exist_ok=True)
 
     safe_name = Path(file.filename or "upload.bin").name
@@ -537,7 +538,7 @@ async def download_file(file_path: str):
             raise HTTPException(status_code=400, detail="Invalid file path")
         
         # Build the full file path
-        uploads_dir = Path(__file__).parent.parent.parent / "uploads"
+        uploads_dir = settings.uploads_dir_path
         full_path = uploads_dir / file_path
         
         # Verify the file exists and is within uploads directory
