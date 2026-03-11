@@ -118,16 +118,20 @@ class Settings(BaseSettings):
         """Resolve the uploads directory, preferring persistent Azure App Service storage."""
         if self.UPLOADS_DIR:
             uploads_dir = Path(self.UPLOADS_DIR)
+            source = "UPLOADS_DIR env var"
         else:
             azure_home = os.getenv("HOME")
             is_azure_app_service = bool(os.getenv("WEBSITE_SITE_NAME") or os.getenv("WEBSITE_INSTANCE_ID"))
 
             if azure_home and is_azure_app_service:
                 uploads_dir = Path(azure_home) / "data" / "uploads"
+                source = f"Azure persistent storage: HOME={azure_home}"
             else:
                 uploads_dir = PROJECT_ROOT / "uploads"
+                source = f"Local project folder (not Azure or HOME not set): HOME={azure_home}"
 
         uploads_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Uploads directory resolved: {uploads_dir} (source: {source})")
         return uploads_dir
 
 

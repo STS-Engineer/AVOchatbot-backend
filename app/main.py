@@ -33,7 +33,8 @@ async def lifespan(app: FastAPI):
     logger.info(f"Environment: {settings.ENVIRONMENT}")
     logger.info(f"Debug: {settings.DEBUG}")
     logger.info(f"Database: {settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}")
-    logger.info(f"Uploads directory: {settings.uploads_dir_path}")
+    logger.info(f"WEBSITE_SITE_NAME: {os.getenv('WEBSITE_SITE_NAME', 'not set')}")
+    logger.info(f"HOME: {os.getenv('HOME', 'not set')}")
     logger.info("=" * 50)
     
     init_services()

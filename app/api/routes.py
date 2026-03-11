@@ -81,9 +81,16 @@ async def upload_file(file: UploadFile = File(...)):
     stored_name = f"{uuid.uuid4().hex[:8]}_{safe_name}"
     file_path = uploads_dir / stored_name
 
+    logger.info(f"[UPLOAD] Saving file '{safe_name}' to: {file_path}")
+
     # Save file
     with file_path.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
+
+    if file_path.exists():
+        logger.info(f"[UPLOAD] File saved successfully, size: {file_path.stat().st_size} bytes")
+    else:
+        logger.error(f"[UPLOAD] File save failed - file not found after write: {file_path}")
 
     analyzer = get_file_analysis_service()
     analysis_result = analyzer.analyze_file(file_path)

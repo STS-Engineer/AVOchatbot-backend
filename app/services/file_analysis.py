@@ -85,13 +85,14 @@ class FileAnalysisService:
         uploads_dir = settings.uploads_dir_path
         contexts: List[str] = []
 
+        logger.info(f"[CHAT-FILE] Looking for uploaded files in: {uploads_dir}")
         for raw_path in uploaded_files:
             safe_name = Path(str(raw_path).replace("\\", "/")).name
             candidate = uploads_dir / safe_name
-            logger.info(f"Building chat file context for uploaded file: raw='{raw_path}', safe='{safe_name}'")
+            logger.info(f"[CHAT-FILE] Attempting to build context for: raw='{raw_path}', safe='{safe_name}', full_path='{candidate}'")
 
             if not candidate.exists() or not candidate.is_file():
-                logger.warning(f"Uploaded file not found for chat context: {raw_path}")
+                logger.warning(f"[CHAT-FILE] File not found or not a file: {candidate} (exists: {candidate.exists()})")
                 continue
 
             extracted = self._extract_text(candidate)
