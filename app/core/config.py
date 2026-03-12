@@ -7,6 +7,7 @@ from typing import List
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from loguru import logger
 
 # Load environment variables from .env file in project root
 PROJECT_ROOT = Path(__file__).parent.parent.parent

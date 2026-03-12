@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 from loguru import logger
 from pathlib import Path
+import os
 import sys
 
 from app.core.config import settings
