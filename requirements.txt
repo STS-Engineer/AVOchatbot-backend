@@ -22,6 +22,9 @@ passlib[bcrypt]
 email-validator
 openai
 pypdf
+pdfplumber
 python-docx
 openpyxl
+pdf2image
+opencv-python
 
