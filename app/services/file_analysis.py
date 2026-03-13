@@ -40,6 +40,32 @@ class FileAnalysisService:
     def __init__(self):
         self.llm = get_llm_service()
 
+    def _resolve_uploaded_candidate(self, uploads_dir: Path, raw_path: str) -> Optional[Path]:
+        """Resolve an uploaded file path, with fallback to same original filename if needed."""
+        safe_name = Path(str(raw_path).replace("\\", "/")).name
+        primary = uploads_dir / safe_name
+        if primary.exists() and primary.is_file():
+            return primary
+
+        # Fallback for stale/missing prefixed files:
+        # if we get "<prefix>_<original_name>", try the most recent file ending with the same original name.
+        original_name = safe_name.split("_", 1)[1] if "_" in safe_name else safe_name
+        if not original_name:
+            return None
+
+        pattern = f"*_{original_name}"
+        matches = [p for p in uploads_dir.glob(pattern) if p.is_file()]
+        if not matches:
+            return None
+
+        matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        resolved = matches[0]
+        logger.info(
+            "[CHAT-FILE] Primary upload missing; resolved fallback candidate "
+            f"for raw='{raw_path}' -> '{resolved.name}'"
+        )
+        return resolved
+
     def analyze_file(self, file_path: Path) -> Dict[str, Any]:
         """Extract text and run a concise LLM analysis."""
         if not file_path.exists() or not file_path.is_file():
@@ -88,11 +114,14 @@ class FileAnalysisService:
         logger.info(f"[CHAT-FILE] Looking for uploaded files in: {uploads_dir}")
         for raw_path in uploaded_files:
             safe_name = Path(str(raw_path).replace("\\", "/")).name
-            candidate = uploads_dir / safe_name
-            logger.info(f"[CHAT-FILE] Attempting to build context for: raw='{raw_path}', safe='{safe_name}', full_path='{candidate}'")
+            candidate = self._resolve_uploaded_candidate(uploads_dir, raw_path)
+            logger.info(
+                f"[CHAT-FILE] Attempting to build context for: raw='{raw_path}', "
+                f"safe='{safe_name}', resolved='{candidate}'"
+            )
 
-            if not candidate.exists() or not candidate.is_file():
-                logger.warning(f"[CHAT-FILE] File not found or not a file: {candidate} (exists: {candidate.exists()})")
+            if not candidate:
+                logger.warning(f"[CHAT-FILE] Could not resolve uploaded file: raw='{raw_path}', safe='{safe_name}'")
                 continue
 
             extracted = self._extract_text(candidate)
